@@ -147,7 +147,7 @@ class Scan:
     #finally read the data (comments at the end are also read and added to the comment attribute)
     data = [map(float,l.split())]
     l = f.readline()
-    while l != '\n':
+    while l != '\n' and l != '':
       if l[0] == '#' and l[1] != 'C':
         break
 #      print l + 'lenght = %i'%(len(l))
