@@ -2,6 +2,7 @@
 # 2012-08-16
 # Sam Tardif (samuel.tardif@gmail.com)
 
+import numpy as np
 
 class Scan:
   """ Simple class to read SPEC files and extract scans. All the parameters of the scan and the data are read and stored as attributes.
@@ -78,7 +79,7 @@ class Scan:
               'C' : self.__commenting__}
   
   def __scanline__(self, l):
-    self.number = l.split()[1]
+    self.number = int(l.split()[1])
     self.type = l.split()[2]
     self.args = l.split()[3:]  
 
@@ -114,13 +115,14 @@ class Scan:
   
   
   
-  def __init__(self, specfile, scannumber, verbose = verbose):
+  def __init__(self, spec_file, scan_number, verbose = verbose):
     self.__motorslabels__ = "" # list of all motors in the experiement
     self.__positions__ = "" # list the values of all motors
     self.__config__ = "" # list the values of the UB matrix config
     self.comments = ""
-
-    f = open(specfile, 'r') 
+    self.file = spec_file
+    
+    f = open(spec_file, 'r') 
 
     #first read the file header (mostly comments and motors definiton)
     l = f.readline()
@@ -133,7 +135,7 @@ class Scan:
 
 
     #now try to find the scan 
-    l = self.__findstring__(f,"#S %i"%(scannumber))
+    l = self.__findstring__(f,"#S %i"%(scan_number))
     if verbose  : print "reading scan " + l
     
     #read the scan header 
@@ -162,7 +164,7 @@ class Scan:
     #set the data as attributes with the counter name
 #    print data
     for i in xrange(len(self.counters)):
-      setattr(self, self.counters[i], asarray(data)[:,i])
+      setattr(self, self.counters[i], np.asarray(data)[:,i])
     
     
     #make the motors/positions dictionary
