@@ -1,5 +1,5 @@
 # SPEC reader
-# 2012-08-16
+# 2014-09-05
 # Sam Tardif (samuel.tardif@gmail.com)
 
 import numpy as np
@@ -57,12 +57,14 @@ class Scan:
   def __findstring__(self, file, pattern):
     found = False
     l = file.readline()
-    while not found:
-      while len(l) < len(pattern): 
+    if l != '' :
+      while not found:
         l = file.readline()
-      if l[:len(pattern)] == pattern: found = True
-      else: l = file.readline()
-    return l
+        if l == '' : break
+        elif len(l) >= len(pattern):
+          if l[:len(pattern)] == pattern: found = True
+    if l == '': raise NameError
+    else : return l
 
   
   # dictionary definitions for handling the spec identifiers
@@ -135,51 +137,55 @@ class Scan:
 
 
     #now try to find the scan 
-    l = self.__findstring__(f,"#S %i"%(scan_number))
-    if verbose  : print "reading scan " + l
-    
-    #read the scan header 
-    while l[0] == '#':
-      try: self.__param__()[l[1]](l)
-      except KeyError:
-        if verbose : print "unprocessed line:\n" + l
-      l = f.readline()
-    
-    
-    #finally read the data (comments at the end are also read and added to the comment attribute)
-    data = [map(float,l.split())]
-    l = f.readline()
-    while l != '\n' and l != '':
-      if l[0] == '#' and l[1] != 'C':
-        break
-#      print l + 'lenght = %i'%(len(l))
-      if l[0] == '#':
+    if verbose  : print "searching scan " + l
+    try: 
+      l = self.__findstring__(f,"#S %i"%(scan_number))
+      
+      #read the scan header 
+      while l[0] == '#':
         try: self.__param__()[l[1]](l)
         except KeyError:
           if verbose : print "unprocessed line:\n" + l
-      else : data.append(map(float,l.split()))
+        l = f.readline()
+      
+      
+      #finally read the data (comments at the end are also read and added to the comment attribute)
+      data = [map(float,l.split())]
       l = f.readline()
-    
-    
-    #set the data as attributes with the counter name
-#    print data
-    for i in xrange(len(self.counters)):
-      setattr(self, self.counters[i], np.asarray(data)[:,i])
-    
-    
-    #make the motors/positions dictionary
-    self.motors = dict(zip(self.__motorslabels__.split(), map(float,self.__positions__.split())))
-    
-    
-    #TEST : attibute-like dictionary
-    # removed due to conflicts when a motor was also a counter
-#    for motor in self.motors:
-#                setattr(self, motor, self.motors[motor])
-    
-    
-    #small sanity check, sometimes N is diffrent from the actual number of columns
-    #which is known to trouble GUIs like Newplot and PyMCA
-    if self.N != len(self.counters): 
-      print "Watch out! There are %i counters in the scan but SPEC knows only N = %i !!"%(len(self.counters),self.N)
-    
+      while l != '\n' and l != '':
+        if l[0] == '#' and l[1] != 'C':
+          break
+  #      print l + 'lenght = %i'%(len(l))
+        if l[0] == '#':
+          try: self.__param__()[l[1]](l)
+          except KeyError:
+            if verbose : print "unprocessed line:\n" + l
+        else : data.append(map(float,l.split()))
+        l = f.readline()
+      
+      
+      #set the data as attributes with the counter name
+  #    print data
+      for i in xrange(len(self.counters)):
+        setattr(self, self.counters[i], np.asarray(data)[:,i])
+      
+      
+      #make the motors/positions dictionary
+      self.motors = dict(zip(self.__motorslabels__.split(), map(float,self.__positions__.split())))
+      
+      
+      #TEST : attibute-like dictionary
+      # removed due to conflicts when a motor was also a counter
+  #    for motor in self.motors:
+  #                setattr(self, motor, self.motors[motor])
+      
+      
+      #small sanity check, sometimes N is diffrent from the actual number of columns
+      #which is known to trouble GUIs like Newplot and PyMCA
+      if self.N != len(self.counters): 
+        print "Watch out! There are %i counters in the scan but SPEC knows only N = %i !!"%(len(self.counters),self.N)
+      
+    except NameError:
+      print "Scan number not found!"
+      
     f.close()  
