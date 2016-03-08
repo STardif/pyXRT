@@ -9,8 +9,31 @@ class SpecFile:
   """
   class to read and identify the scans positions in a spec file
   builds a dictionary scan_dict of {scan_number, binary position in spec_file}
-  """
 
+  Simple class to read SPEC file. The main purposes are :
+  (i) read the header and initiate the relevant properties
+  (ii) build a dictionary of the scan number and their binary position in the file
+  The latter allows for faster subsequent scan reading
+
+  Definition:
+  -----------
+  SpecFile(spec_file, verbose = False)
+   > spec_file : string
+   > scan_numbers : integer or as tuple/list/array of integer
+
+  Attributes (typical):
+  -----------
+  comments........all comments
+  date............scan start datestamp
+  file............string of the SPEC file name
+  scan_dict.......dictionary {scan number : binary position in file}
+
+  Examples:
+  --------
+  # read the specfile
+  In : sf = SpecFile('./lineup0.dat')
+
+  """
   # dictionary definitions for handling the spec identifiers
   def __param__(self):
     return  { 'S' : self.__scanline__,
@@ -68,6 +91,7 @@ class SpecFile:
 
 
   def __init__(self, spec_file, verbose = False):
+    # init a bunch of stuff that will also be used by the children class Scan
     self.file = spec_file
     self.__motorslabels__ = "" # list of all motors in the experiment
     self.__motorslabelsnospace__ = "" # list of all motors in the experiment
@@ -114,13 +138,13 @@ class SpecFile:
 
 class Scan(SpecFile):
   """
-  Simple class to read SPEC files and extract scans. All the parameters of the scan and the data are read
+  Simple class to read extract scans from SPEC files. All the parameters of the scan and the data are read
   and stored as attributes.
   
   Definition:
   -----------
   Scan(spec_file, scan_numbers, verbose = False)
-   > spec_file as string
+   > spec_file as SpecFile object or string (in this case a SpecFile object will be instanced)
    > scan_numbers as integer or as tuple/list/array of integer
   
   Attributes:
@@ -144,12 +168,15 @@ class Scan(SpecFile):
 
   Examples:
   --------
+  # read the specfile
+  In : sf = SpecFile('./lineup0.dat')
+
   # read the scan
-  In : scan = Scan('./lineup0.dat', 265)
+  In : scan = Scan(sf, 265)
   
   # read a series of scans
-  In : scan = Scan('./lineup0.dat', (265,266,270))
-  In : scan = Scan('./lineup0.dat', arange(265,270))
+  In : scan = Scan(sf, (265,266,270))
+  In : scan = Scan(sf, arange(265,270))
     
   # learn about the motors
   In : scan.motors
@@ -170,38 +197,26 @@ class Scan(SpecFile):
   
   """
   
-  verbose = False
-
-  # routine to search for a particular string in the file
-  def __findstring__(self, file, pattern):
-    found = False
-    l = file.readline()
-    while not found:
-      while len(l) < len(pattern): 
-        l = file.readline()
-      if l[:len(pattern)] == pattern: found = True
-      else: l = file.readline()
-    return l
-
 
   
-  
-  def __init__(self, spec_file, scan_numbers, verbose = verbose):
+  def __init__(self, spec_file, scan_numbers, verbose = False):
+    if type(spec_file) == str:
+      spec_file = SpecFile(spec_file)
+    self.file = spec_file.file
     try :
       len_scan_number = len(scan_numbers)  # it is a list of scan
     except TypeError:
       scan_numbers = [scan_numbers,]  # it is a simple scan, we make a len 0 list
     scan_number = scan_numbers[0] #for all intents and purposes
-    self.__motorslabels__ = "" # list of all motors in the experiment
-    self.__motorslabelsnospace__ = "" # list of all motors in the experiment
+    # recover the names of the motors from the header of the SPEC file (i.e. the SpecFile instance)
+    self.__motorslabels__ = spec_file.__motorslabels__ # list of all motors in the experiment
+    self.__motorslabelsnospace__ = spec_file.__motorslabelsnospace__ # list of all motors in the experiment
+    # prepare the scan-specific attributes
     self.__positions__ = "" # list the values of all motors
     self.__config__ = "" # list the values of the UB matrix config
     self.scan_numbers = scan_numbers
     self.comments = ""
 
-    if type(spec_file) == str:
-      spec_file = SpecFile(spec_file)
-    self.file = spec_file.file
 
     with open(self.file,'rU') as f:
       # read the first (and possibly only) scan in the list
@@ -212,7 +227,9 @@ class Scan(SpecFile):
 
       # read the scan header
       while l[0] == '#':
-        try: self.__param__()[l[1]](l)
+        try:
+          self.__param__()[l[1]](l)
+          print "read {}".format(l[1])
         except KeyError:
           if verbose : print "unprocessed line:\n" + l
         l = f.readline()
