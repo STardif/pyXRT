@@ -7,9 +7,6 @@ import numpy as np
 
 class SpecFile:
   """
-  class to read and identify the scans positions in a spec file
-  builds a dictionary scan_dict of {scan_number, binary position in spec_file}
-
   Simple class to read SPEC file. The main purposes are :
   (i) read the header and initiate the relevant properties
   (ii) build a dictionary of the scan number and their binary position in the file
