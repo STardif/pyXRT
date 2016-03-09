@@ -7,6 +7,7 @@ import numpy as np
 
 class SpecFile:
   """
+
   Simple class to read SPEC file. The main purposes are :
   (i) read the header and initiate the relevant properties
   (ii) build a dictionary of the scan number and their binary position in the file
@@ -226,7 +227,6 @@ class Scan(SpecFile):
       while l[0] == '#':
         try:
           self.__param__()[l[1]](l)
-          print "read {}".format(l[1])
         except KeyError:
           if verbose : print "unprocessed line:\n" + l
         l = f.readline()
