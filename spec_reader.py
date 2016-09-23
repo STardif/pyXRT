@@ -95,11 +95,11 @@ class SpecFile:
     self.__param__()[l[2:].split(' ')[0]](l) 
     
   def __xiafilenaming__(self, l):
-    self.xianame = l.split()[1:]
+    self.xianame = l.split()[1:][0]
     self.xiaroi = dict()
     
   def __xiacalibrating__(self, l):
-    self.xiacalib = l.split()[1:]
+    self.xiacalib = l.split()[1:][0]
     
   def __xiaroidefining__(self, l):
     self.xiaroi[l.split()[1]] = [int(l.split()[2]),int(l.split()[3]),int(l.split()[4]),int(l.split()[5]),int(l.split()[6])]
