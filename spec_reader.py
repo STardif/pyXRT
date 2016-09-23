@@ -45,7 +45,11 @@ class SpecFile:
               'M' : self.__marccdpath__,
               'N' : self.__speccol__,
               'L' : self.__counterslabeling__,
-              'C' : self.__commenting__}
+              'C' : self.__commenting__,
+              '@' : self.__special__,
+              'XIAFILE' : self.__xiafilenaming__,
+              'XIACALIB' : self.__xiacalibrating__,
+              'XIAROI' : self.__xiaroidefining__}
 
   def __scanline__(self, l):
     self.number = int(l.split()[1])
@@ -87,7 +91,19 @@ class SpecFile:
   def __marccdpath__(self, l):
     self.M = l.split()[1:]
 
-
+  def __special__(self, l):
+    self.__param__()[l[2:].split(' ')[0]](l) 
+    
+  def __xiafilenaming__(self, l):
+    self.xianame = l.split()[1:]
+    self.xiaroi = dict()
+    
+  def __xiacalibrating__(self, l):
+    self.xiacalib = l.split()[1:]
+    
+  def __xiaroidefining__(self, l):
+    self.xiaroi[l.split()[1]] = [int(l.split()[2]),int(l.split()[3]),int(l.split()[4]),int(l.split()[5]),int(l.split()[6])]
+    
   def __init__(self, spec_file, verbose = False):
     # init a bunch of stuff that will also be used by the children class Scan
     self.file = spec_file
