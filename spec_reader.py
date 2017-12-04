@@ -50,7 +50,8 @@ class SpecFile:
               '@' : self.__special__,
               'XIAFILE' : self.__xiafilenaming__,
               'XIACALIB' : self.__xiacalibrating__,
-              'XIAROI' : self.__xiaroidefining__}
+              'XIAROI' : self.__xiaroidefining__,
+              'ULIMA_mpx4' : self.__limampx4path__}
 
   def __scanline__(self, l):
     self.number = int(l.split()[1])
@@ -91,7 +92,10 @@ class SpecFile:
 
   def __marccdpath__(self, l):
     self.M = l.split()[1:]
-
+    
+  def __limampx4path__(self, l):
+    self.M = l.split()[1:]
+    
   def __special__(self, l):
     self.__param__()[l[2:].split(' ')[0]](l) 
     
