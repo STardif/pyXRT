@@ -94,7 +94,7 @@ class SpecFile:
     self.M = l.split()[1:]
     
   def __limampx4path__(self, l):
-    self.M = l.split()[1:]
+    self.limampx4path = l.split()[1:]
     
   def __special__(self, l):
     self.__param__()[l[2:].split(' ')[0]](l) 
