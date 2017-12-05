@@ -4,6 +4,8 @@
 # Python3 compatibility by Nils Blanc
 
 import numpy as np
+import os.path
+import string
 
 
 class SpecFile:
@@ -46,12 +48,17 @@ class SpecFile:
               'M' : self.__marccdpath__,
               'N' : self.__speccol__,
               'L' : self.__counterslabeling__,
+              'J' : self.__allcounterslabeling__,
+              'j' : self.__allcounterslabelingnospace__,
               'C' : self.__commenting__,
+              'E' : self.__initialepoch__,
+              'F' : self.__specfilenaming__,
               '@' : self.__special__,
               'XIAFILE' : self.__xiafilenaming__,
               'XIACALIB' : self.__xiacalibrating__,
               'XIAROI' : self.__xiaroidefining__,
-              'ULIMA_mpx4' : self.__limampx4path__}
+              'ULIMA_mpx4' : self.__limampx4path__,
+              'UDETCALIB' : self.__detcalib__}
 
   def __scanline__(self, l):
     self.number = int(l.split()[1])
@@ -60,41 +67,66 @@ class SpecFile:
     self.command = l[3+len(l.split()[1])+2:].rstrip()
 
   def __dating__(self, l):
-    self.date = l[3:]
+    self.date = " ".join(l.split()[1:])
 
   def __counting__(self, l):
     self.ct = float(l.split()[1])
     self.ct_units = l.split()[2]
 
   def __configurating__(self, l):
-    self.__config__ = self.__config__ + l[3:] + " "
+    self.__config__ = self.__config__ + " ".join(l.split()[1:]) + " "
 
   def __hkl__(self, l):
-    self.Qo = l[3:].split()
+    self.Qo = l.split()[1:]
 
   def __motorslabeling__(self, l):
-    self.__motorslabels__ = self.__motorslabels__ + l[3:] + " "
+    self.__motorslabels__ = self.__motorslabels__ + " ".join(l.split()[1:]) + " "
 
   def __motorslabelingnospace__(self, l):
-    self.__motorslabelsnospace__ = self.__motorslabelsnospace__ + l[3:] + " "
+    self.__motorslabelsnospace__ = self.__motorslabelsnospace__ + " ".join(l.split()[1:]) + " "
 
   def __positioning__(self, l):
-    self.__positions__ = self.__positions__ + l[3:] + " "
+    self.__positions__ = self.__positions__ + " ".join(l.split()[1:]) + " "
 
   def __speccol__(self, l):
-    self.N = int(l[3:])
+    self.N = int(" ".join(l.split()[1:]))
 
   def __counterslabeling__(self, l):
+    # column labels
     self.counters = l.split()[1:]
 
+  def __allcounterslabeling__(self, l):
+    # all counters in the experiment
+    self.__counters__ = self.__counters__  + " ".join(l.split()[1:]) + " "
+    
+  def __allcounterslabelingnospace__(self, l):
+    # all counters in the experiment
+    self.__countersnospace__ = self.__countersnospace__  + " ".join(l.split()[1:]) + " "
+  
+  def __specfilenaming__(self, l):
+    self.specfilename = l.split()[1:]
+
   def __commenting__(self, l):
-    self.comments = self.comments + l[3:]
+    self.comments = self.comments + " ".join(l.split()[1:])  
+
+  def __initialepoch__(self, l):
+    self.Epoch0 = int(l.split()[1])
 
   def __marccdpath__(self, l):
     self.M = l.split()[1:]
     
   def __limampx4path__(self, l):
-    self.limampx4path = l.split()[1:]
+    self.limampx4path = os.path.join(*l.split()[1:][0].split(os.path.sep))  #l.split()[1:][0]
+
+  def __detcalib__(self, l):
+    detcalib = l.split(' ')[1].split(',')
+#    cen_pix_x=352.585,cen_pix_y=139.262,pixperdeg=315.152,det_distance_CC=0.993,det_distance_COM=0.992,timestamp=2017-11-10T11:54:52.621448
+    self.detcalib_cen_pix_x = np.float(detcalib[0].split('=')[1])
+    self.detcalib_cen_pix_y = np.float(detcalib[1].split('=')[1])
+    self.detcalib_pixperdeg = np.float(detcalib[2].split('=')[1])
+    self.detcalib_det_distance_CC = np.float(detcalib[3].split('=')[1])
+    self.detcalib_det_distance_COM = np.float(detcalib[4].split('=')[1])
+    self.detcalib_timestamp = detcalib[5].split('=')[1]  
     
   def __special__(self, l):
     self.__param__()[l[2:].split(' ')[0]](l) 
@@ -108,17 +140,28 @@ class SpecFile:
     
   def __xiaroidefining__(self, l):
     self.xiaroi[l.split()[1]] = [int(l.split()[2]),int(l.split()[3]),int(l.split()[4]),int(l.split()[5]),int(l.split()[6])]
-    
+
+
+  def __readSpecLine__(self,l, verbose=False):
+    try: 
+      SpecKey = l.split()[0][1:]
+      if SpecKey[0] != "U": SpecKey = SpecKey.rstrip(string.digits) # remove trailing digits for SpecKeys other than those starting with "U" (User defined?)
+      self.__param__()[SpecKey](l)          
+    except KeyError:
+      if verbose : print("unprocessed line (SpecKey {}): ".format(SpecKey) + l)
+
+
   def __init__(self, spec_file, verbose = False):
     # init a bunch of stuff that will also be used by the children class Scan
     self.file = spec_file
     self.__motorslabels__ = "" # list of all motors in the experiment
     self.__motorslabelsnospace__ = "" # list of all motors in the experiment
     self.__positions__ = "" # list the values of all motors
+    self.__counters__ = "" # list of all counters in the experiment
+    self.__countersnospace__ = "" # list of all counters in the experiment
     self.__config__ = "" # list the values of the UB matrix config
     self.comments = ""
     self.scan_dict={}  # dictionary to store the position in the file of the scans
-
     try:
       with open(spec_file,'rU') as f:  # the U mode indicates universal line break, essential for accurate counting
         # first read the file header (mostly comments and motors definition)
@@ -135,9 +178,7 @@ class SpecFile:
                   print("after reading the header, found scan {} at location {}".format(scan_number,position_in_file))
               self.scan_dict[scan_number] = position_in_file
             else:
-              try: self.__param__()[l[1]](l)
-              except KeyError:
-                if verbose : print("unprocessed line:" + l)
+              self.__readSpecLine__(l, verbose=verbose)
         reading_file = True  # change this switch when the end of file is reached (i.e. read an empty string)
         while reading_file:
           position_in_file = f.tell() # get the position AHEAD of the scan first line
@@ -233,6 +274,8 @@ class Scan(SpecFile):
     # prepare the scan-specific attributes
     self.__positions__ = "" # list the values of all motors
     self.__config__ = "" # list the values of the UB matrix config
+    self.__counters__ = "" # list of all counters in the experiment
+    self.__countersnospace__ = "" # list of all counters in the experiment
     self.scan_numbers = scan_numbers
     self.comments = ""
 
@@ -246,10 +289,7 @@ class Scan(SpecFile):
 
       # read the scan header
       while l[0] == '#':
-        try:
-          self.__param__()[l[1]](l)
-        except KeyError:
-          if verbose : print("unprocessed line:\n" + l)
+        self.__readSpecLine__(l, verbose=verbose)
         l = f.readline()
 
       # finally read the data (comments at the end are also read and added to the comment attribute)
@@ -258,11 +298,10 @@ class Scan(SpecFile):
       while l != '\n' and l != '':
         if l[0] == '#' and l[1] != 'C':
           break
-        if l[0] == '#':
-          try: self.__param__()[l[1]](l)
-          except KeyError:
-            if verbose : print("unprocessed line:\n" + l)
-        else : data.append(list(map(float,l.split())))
+        if l[0] == '#': 
+            self.__readSpecLine__(l, verbose=verbose)
+        else : 
+            data.append(list(map(float,l.split())))
         l = f.readline()
 
 
@@ -301,10 +340,9 @@ class Scan(SpecFile):
               if l[0] == '#' and l[1] != 'C':
                 break
               if l[0] == '#':
-                try: self.__param__()[l[1]](l)
-                except KeyError:
-                  if verbose : print("unprocessed line:\n" + l)
-              else : data.append(list(map(float,l.split())))
+                self.__readSpecLine__(l, verbose=verbose)
+              else : 
+                data.append(list(map(float,l.split())))
               l = f.readline()
           else :
             print("not all scans are the same type")
