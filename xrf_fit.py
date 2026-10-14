@@ -592,7 +592,7 @@ def element_line_groups(
                 if e_ev is None or not (emin_ev <= e_ev <= emax_ev):
                     continue
                 if matrix is not None:
-                    s = matrix.primary(z, macro, e_ev / 1000.0)
+                    s = matrix.emission(z, macro, e_ev / 1000.0, secondary=False)
                 elif incident_spectrum is None:
                     s = _line_strength(z, macro, e0_eff_kev, weighting)
                 else:
@@ -612,10 +612,10 @@ def element_line_groups(
                 updated = []
                 for n, e, s in found:
                     if s >= 0.5 * min_rel * s_max_p:
-                        sec = matrix.secondary(z, _LINE_MACROS[n + "_LINE"], e / 1000.0)
+                        s = matrix.emission(z, _LINE_MACROS[n + "_LINE"], e / 1000.0,
+                                            secondary=True)
                         if detector is not None:
-                            sec *= detector.efficiency(e)
-                        s = s + sec
+                            s *= detector.efficiency(e)
                     updated.append((n, e, s))
                 found = updated
 
@@ -628,8 +628,17 @@ def element_line_groups(
             lines.sort(key=lambda l: -l.rel)
 
             if lines:
+                ref_strength = float(s_max)
+                if matrix is not None and "+" not in lines[0].name:
+                    # per unit mass fraction in the target layer (the emission
+                    # weighting above includes the stack composition)
+                    e_ref = lines[0].energy_ev
+                    ref_strength = matrix.sensitivity(z, _LINE_MACROS[lines[0].name + "_LINE"],
+                                                      e_ref / 1000.0)
+                    if detector is not None:
+                        ref_strength *= detector.efficiency(e_ref)
                 groups.append(LineGroup(element=symbol, family=fam, lines=lines,
-                                        ref_strength=float(s_max)))
+                                        ref_strength=float(ref_strength)))
                 logger.info("%s %s: %d lines, reference %s at %.0f eV",
                             symbol, fam, len(lines), lines[0].name, lines[0].energy_ev)
 
