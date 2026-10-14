@@ -1,0 +1,106 @@
+{
+  "file": "NIO295_laue_map_precise.h5",
+  "scan": 1,
+  "pixels_used": 8281,
+  "calibration": {
+    "gain_ev_per_channel": 10.032,
+    "offset_ev": -31.263
+  },
+  "detector": {
+    "material": "Si",
+    "noise_ev": 23.683234465199224,
+    "fano": 0.12,
+    "gamma_ev": 5.0
+  },
+  "elements": [
+    "Nd",
+    "Ir",
+    "Pt",
+    "Pb"
+  ],
+  "families": [
+    "K",
+    "L"
+  ],
+  "e0_eff_kev": 20.0,
+  "min_rel": 0.005,
+  "roi_channels": [
+    431,
+    1580
+  ],
+  "background_order": 2,
+  "chi2_red": 2652.040236915165,
+  "residual_rms_percent_of_peak": 1.7221472704282563,
+  "parameters": {
+    "bkg_0": {
+      "value": 0.8128839025391779,
+      "stderr": 0.0021279551274834773
+    },
+    "bkg_1": {
+      "value": 1.0402407113359078,
+      "stderr": 0.0014443014270499226
+    },
+    "bkg_2": {
+      "value": -0.12000686850331037,
+      "stderr": 0.0029833085806915518
+    },
+    "A_NdL": {
+      "value": 2018.782585590463,
+      "stderr": 0.5257510568076341
+    },
+    "A_IrL": {
+      "value": 8780.188261705114,
+      "stderr": 1.3143987337316634
+    },
+    "A_PtL": {
+      "value": 763.6345844652698,
+      "stderr": 0.48580312911078294
+    },
+    "A_PbL": {
+      "value": 2559.2269026108065,
+      "stderr": 0.8261591519730923
+    },
+    "noise_ev": {
+      "value": 36.35672724899326,
+      "stderr": 0.07662968431802378
+    },
+    "fano": {
+      "value": 0.11367759107003966,
+      "stderr": 0.00017104710188691572
+    },
+    "gamma_ev": {
+      "value": 13.51837256170832,
+      "stderr": 0.017387607223966973
+    }
+  },
+  "group_areas": {
+    "Nd L": {
+      "reference_line": "L3M5",
+      "reference_area": 2018.782585590463,
+      "reference_area_stderr": 0.5257510568076341,
+      "total_area": 5225.237315957271,
+      "n_lines": 14
+    },
+    "Ir L": {
+      "reference_line": "L3M5",
+      "reference_area": 8780.188261705114,
+      "reference_area_stderr": 1.3143987337316634,
+      "total_area": 21439.56570045475,
+      "n_lines": 14
+    },
+    "Pt L": {
+      "reference_line": "L3M5",
+      "reference_area": 763.6345844652698,
+      "reference_area_stderr": 0.48580312911078294,
+      "total_area": 1806.7942118603687,
+      "n_lines": 14
+    },
+    "Pb L": {
+      "reference_line": "L3M5",
+      "reference_area": 2559.2269026108065,
+      "reference_area_stderr": 0.8261591519730923,
+      "total_area": 6022.250020843092,
+      "n_lines": 14
+    }
+  }
+}
