@@ -42,20 +42,30 @@ the two approaches agree, since all K lines share one initial vacancy.
 
 ``E0`` is a single *effective* excitation energy.  Under white-beam illumination
 the physically correct weighting is the flux-weighted integral
-``int sigma(E) Phi(E) dE``; a scalar ``E0`` is a deliberate first-order stand-in
-until the beamline spectrum model is wired in.  ``E0`` must exceed the highest
-relevant absorption edge (e.g. the Ir L1 edge at 13.42 keV) or the high-subshell
-lines are silently given zero intensity.
+``int sigma(E) dPhi/dE dE`` (pass ``incident_spectrum`` to
+:func:`element_line_groups`; the per-0.1 %BW -> per-keV conversion is applied
+internally).  With a scalar ``E0``, it must exceed the highest relevant
+absorption edge (e.g. the Ir L1 edge at 13.42 keV) or the high-subshell lines
+are silently given zero intensity.
+
+Detection efficiency (air path, entrance window, sensor absorption) is applied
+when a :class:`Detector` is passed to :func:`element_line_groups`; its defaults
+describe the BM32 KETEK VITUS H7 CH.  :func:`number_ratio` then converts fitted
+areas into atom-number ratios.
+
+Matrix effects (self-absorption and secondary fluorescence in a layer or bulk
+sample) come from :mod:`xrf_matrix`: pass a ``MatrixModel`` to
+:func:`element_line_groups`.
+
+Sensor escape peaks (``escape=True``) and pile-up sum peaks
+(``pileup_template``, from :func:`pileup_spectra`) are optional parts of
+:class:`XRFModel`; the escape peaks add no free parameter, pile-up adds one
+(the pulse-pair resolving time).
 
 What this module does *not* do yet
 ----------------------------------
-* No detector efficiency: a line's modelled intensity is its emitted intensity.
-  Comparing groups at different energies (K vs L, or two elements far apart) is
-  therefore not quantitative.
-* No self-absorption / matrix correction, no secondary fluorescence.
-* No escape or pile-up peaks.  On the NIO295 map the dead-time fraction reaches
-  0.79 and a 2x(Ir La) sum peak is visible near channel 1830, so pile-up is
-  present and will appear in the residual.
+* No low-energy tail / shelf in the detector response (Hypermet).
+* No Laue (Bragg) peaks from the sample in the fluorescence spectrum.
 * The energy calibration is taken as given, not fitted.
 
 Authors: Samuel Tardif, with Claude (Anthropic).
@@ -70,9 +80,12 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import xraylib
-from scipy.integrate import simpson
+from scipy.integrate import trapezoid
 from scipy.optimize import curve_fit
 from scipy.special import voigt_profile
+
+from xrf_beamline import AIR_FORMULA, air_density, per_unit_energy
+from xrf_matrix import MatrixModel
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +111,9 @@ __all__ = [
     "MapResult",
     "design_matrix",
     "fit_map",
+    "number_ratio",
+    "pileup_spectra",
+    "average_pileup_template",
     "pixel_parameters",
     "select_pixels",
     "plot_pixel_fits",
@@ -148,6 +164,9 @@ class Calibration:
 #: Mean energy to create one electron-hole pair, in eV.
 PAIR_ENERGY_EV = {"Si": 3.85, "Ge": 2.96}
 
+#: Sensor densities, g/cm^3, for the detection-efficiency model.
+SENSOR_DENSITY_G_CM3 = {"Si": 2.33, "Ge": 5.323}
+
 
 @dataclass
 class Detector:
@@ -175,12 +194,41 @@ class Detector:
         natural level width (a few eV for an L line); in practice it also
         absorbs part of the low-energy tail, so treat a fitted value above
         ~30 eV as a sign that a proper tail term is needed.
+
+    Detection efficiency
+    --------------------
+    The remaining fields describe the path from sample to sensor, used by
+    :meth:`efficiency`.  Defaults are the BM32 KETEK VITUS H7 CH SDD:
+    450 um Si sensor, 1 um carbon ("CH" graphene) entrance window, and
+    ~20 cm of air between sample and detector.
+
+    sensor_thickness_um : float
+        Active sensor thickness ("absorption depth" on the datasheet).
+    window_material, window_density_g_cm3, window_thickness_um
+        Entrance window.  At 1 um, carbon is transparent above ~2 keV.
+    air_path_cm : float
+        Sample-to-window air path.  **This dominates the efficiency of soft
+        lines**: 20 cm of air transmits ~4 % at In La (3.29 keV), and each
+        extra cm costs ~15 % there, against ~0.3 % at Ga Ka.
+    air_temperature_c, air_pressure_hpa : float
+        Ambient conditions for the air density (local pressure, ~990 hPa at
+        the ESRF, changes the 20 cm optical depth at 3.3 keV by ~8 %).
+    dead_layer_um : float
+        Inactive Si at the entrance; unknown for this unit, default 0.
     """
 
     material: str = "Si"
     noise_ev: float = 30.0
     fano: float = 0.12
     gamma_ev: float = 5.0
+    sensor_thickness_um: float = 450.0
+    window_material: str = "C"
+    window_density_g_cm3: float = 2.2
+    window_thickness_um: float = 1.0
+    air_path_cm: float = 20.0
+    air_temperature_c: float = 20.0
+    air_pressure_hpa: float = 1013.25
+    dead_layer_um: float = 0.0
 
     @property
     def pair_energy_ev(self) -> float:
@@ -188,6 +236,75 @@ class Detector:
             return PAIR_ENERGY_EV[self.material]
         except KeyError:
             raise ValueError(f"material must be one of {list(PAIR_ENERGY_EV)}, got {self.material!r}")
+
+    def efficiency(self, energy_ev: np.ndarray | float) -> np.ndarray | float:
+        """Probability that a photon emitted towards the detector is recorded
+        in the full-energy peak region.
+
+        ``T_air * T_window * T_dead * (1 - exp(-mu_photo * d_sensor))``
+
+        Attenuation along the path uses the total cross-section (any
+        interaction removes the photon); absorption in the sensor uses the
+        **photoelectric** cross-section only, since a Compton- or Rayleigh-
+        scattered photon does not deposit its full energy.  Escape peaks are
+        not subtracted here: they are a redistribution within the recorded
+        spectrum and belong to the line shape.
+        """
+        scalar = np.ndim(energy_ev) == 0
+        e_kev = np.atleast_1d(np.asarray(energy_ev, dtype=float)) / 1000.0
+        rho_air = air_density(self.air_temperature_c, self.air_pressure_hpa)
+        rho_sensor = SENSOR_DENSITY_G_CM3[self.material]
+        z_sensor = xraylib.SymbolToAtomicNumber(self.material)
+        out = np.zeros_like(e_kev)
+        for i, ek in enumerate(e_kev):
+            ek = float(ek)
+            try:
+                t_air = np.exp(-xraylib.CS_Total_CP(AIR_FORMULA, ek) * rho_air * self.air_path_cm)
+                t_win = np.exp(-xraylib.CS_Total_CP(self.window_material, ek)
+                               * self.window_density_g_cm3 * self.window_thickness_um * 1e-4)
+                t_dead = np.exp(-xraylib.CS_Total(z_sensor, ek) * rho_sensor * self.dead_layer_um * 1e-4)
+                absorbed = 1.0 - np.exp(-xraylib.CS_Photo(z_sensor, ek) * rho_sensor
+                                        * self.sensor_thickness_um * 1e-4)
+            except ValueError:
+                continue
+            out[i] = t_air * t_win * t_dead * absorbed
+        return float(out[0]) if scalar else out
+
+    def escape_lines(self, energy_ev: float) -> List[Tuple[float, float]]:
+        """Escape peaks of a line at ``energy_ev``: ``[(escape energy eV, fraction)]``.
+
+        A photon absorbed in the sensor's K shell can be followed by a sensor
+        K X-ray that leaves the crystal, so the event is recorded at
+        ``E - E_X``.  For normal incidence on a semi-infinite sensor
+        (Reed & Ware 1972)::
+
+            f_X = 1/2 * omega_K * (tau_K / tau) * p_X * [1 - (mu_X/mu_E) ln(1 + mu_E/mu_X)]
+
+        with ``tau_K/tau`` the K-shell share of photoabsorption at E,
+        ``p_X`` the radiative branching of the escaping line (K-alpha,
+        K-beta), ``mu_E`` the photoabsorption coefficient at E and ``mu_X``
+        the attenuation of the escaping X-ray.  ~0.1 % for Ga/As K in Si,
+        ~1 % just above the Si K edge.
+        """
+        z = xraylib.SymbolToAtomicNumber(self.material)
+        e_kev = energy_ev / 1000.0
+        if e_kev <= xraylib.EdgeEnergy(z, xraylib.K_SHELL):
+            return []
+        omega = xraylib.FluorYield(z, xraylib.K_SHELL)
+        tau = xraylib.CS_Photo(z, e_kev)
+        tau_k = xraylib.CS_Photo_Partial(z, xraylib.K_SHELL, e_kev)
+        out = []
+        for macro in (xraylib.KA_LINE, xraylib.KB_LINE):
+            try:
+                e_x = xraylib.LineEnergy(z, macro)
+                p_x = xraylib.RadRate(z, macro)
+            except ValueError:
+                continue
+            ratio = xraylib.CS_Total(z, e_x) / tau
+            frac = 0.5 * omega * (tau_k / tau) * p_x * (1.0 - ratio * np.log1p(1.0 / ratio))
+            if frac > 0:
+                out.append((energy_ev - 1000.0 * e_x, float(frac)))
+        return out
 
     def sigma_ev(self, energy_ev: np.ndarray | float,
                  noise_ev: Optional[float] = None,
@@ -203,12 +320,13 @@ class Detector:
 
     @classmethod
     def from_fwhm(cls, fwhm_ev: float, at_energy_ev: float, material: str = "Si",
-                  fano: float = 0.12, gamma_ev: float = 5.0) -> "Detector":
+                  fano: float = 0.12, gamma_ev: float = 5.0, **kw) -> "Detector":
         """Build a detector whose FWHM equals ``fwhm_ev`` at ``at_energy_ev``.
 
         Solves for the electronic-noise term given a Fano factor, which is the
         usual way a quoted resolution figure ("135 eV at Mn Ka") is turned into
-        a resolution law.
+        a resolution law.  Extra keyword arguments set the detection-efficiency
+        fields (``air_path_cm``, ``window_thickness_um`` …).
         """
         sigma = fwhm_ev / 2.3548
         var_fano = fano * PAIR_ENERGY_EV[material] * at_energy_ev
@@ -218,7 +336,8 @@ class Detector:
                 f"FWHM {fwhm_ev} eV at {at_energy_ev} eV is below the Fano limit "
                 f"({2.3548 * np.sqrt(var_fano):.1f} eV) for {material} with F={fano}."
             )
-        return cls(material=material, noise_ev=float(np.sqrt(var_noise)), fano=fano, gamma_ev=gamma_ev)
+        return cls(material=material, noise_ev=float(np.sqrt(var_noise)), fano=fano,
+                   gamma_ev=gamma_ev, **kw)
 
 
 # =============================================================================
@@ -251,11 +370,20 @@ class LineGroup:
 
     One group per (element, shell family).  ``lines[0]`` is the reference line,
     whose integrated area is the fitted parameter.
+
+    ``ref_strength`` keeps the *absolute* strength of the reference line, i.e.
+    the normalisation that ``rel`` divides out: the mass fluorescence
+    cross-section (cm^2/g) at ``e0_eff_kev`` or, under white-beam excitation,
+    ``int sigma(E) dPhi/dE dE``, multiplied by the detection efficiency when a
+    detector was supplied.  It is what converts fitted areas into atom-number
+    ratios (:func:`number_ratio`).  Groups are only comparable if they were
+    built with the same excitation and detector.
     """
 
     element: str
     family: str          # "K", "L" or "M"
     lines: List[Line]
+    ref_strength: float = float("nan")
 
     @property
     def label(self) -> str:
@@ -319,21 +447,29 @@ def _line_energy_ev(z: int, macro: int) -> Optional[float]:
 
 def _line_strength_spectral(z: int, macro: int,
                             energy_kev: np.ndarray, flux: np.ndarray) -> float:
-    """Flux-weighted line strength, ``integral sigma_l(E) * Phi(E) dE``.
+    """Flux-weighted line strength, ``integral sigma_l(E) * dPhi/dE dE``.
 
     The correct relative-intensity measure under polychromatic illumination:
     each subshell is excited only by the part of the spectrum above its own
     edge, so subshells whose edges sit inside the band are down-weighted
     relative to what a single effective energy would give.
 
-    Integrated with Simpson's rule on the supplied grid.  Adaptive quadrature is
-    the wrong tool here: the integrand is identically zero below the edge and
-    jumps discontinuously above it.
+    ``flux`` is taken **per 0.1 % bandwidth**, as returned by
+    ``xrf_beamline.Beamline.spectrum``, and converted here to a per-keV
+    density (``/ (1e-3 E)``) before integrating over ``dE``.  Omitting that
+    Jacobian over-weights high energies by a factor E; on BM32 it inflated the
+    Ga/As k-factor by ~9 %.
+
+    Integrated with the trapezoidal rule on the supplied grid, which cannot
+    overshoot at the absorption edge (Simpson's rule can).  Use a fine grid:
+    the integrand is zero below the edge and jumps discontinuously above it,
+    so the edge error is of order one grid step times the jump.
 
     Parameters
     ----------
     energy_kev, flux : (n,) arrays
-        Incident spectrum.  Only the shape matters; any constant scale cancels.
+        Incident spectrum, flux per 0.1 % BW.  Only the shape matters; any
+        constant scale cancels in ratios.
     """
     cs = np.zeros_like(energy_kev)
     for i, ek in enumerate(energy_kev):
@@ -345,7 +481,8 @@ def _line_strength_spectral(z: int, macro: int,
             cs[i] = v
     if not np.any(cs):
         return 0.0
-    return float(max(0.0, simpson(cs * flux, x=energy_kev)))
+    density = per_unit_energy(energy_kev, flux)
+    return float(max(0.0, trapezoid(cs * density, x=energy_kev)))
 
 
 def _line_strength(z: int, macro: int, e0_kev: float, weighting: str) -> float:
@@ -375,6 +512,8 @@ def element_line_groups(
     weighting: str = "kissel",
     merge_within_ev: float = 0.0,
     incident_spectrum: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    detector: Optional["Detector"] = None,
+    matrix: Optional["MatrixModel"] = None,
 ) -> List[LineGroup]:
     """Build the line groups to fit.
 
@@ -400,8 +539,24 @@ def element_line_groups(
         cross-sections at the single energy ``e0_eff_kev``.  This is the correct
         treatment for polychromatic illumination and is what changes the L
         subshell weights of heavy elements, whose edges fall inside the band.
-        Only the shape of ``flux`` matters.  Build one with
-        ``xrf_beamline.BM32_WHITE_BEAM().spectrum(energy_grid)``.
+        ``flux`` is per 0.1 % bandwidth (the 1/E conversion is applied
+        internally) and only its shape matters.  Build one with
+        ``xrf_beamline.BM32_WHITE_BEAM().spectrum(energy_grid)[1]``; a grid
+        step of ~10 eV keeps the edge discretisation error below 0.1 %.
+    detector : Detector, optional
+        If given, every line strength is multiplied by
+        ``detector.efficiency(E_line)``, so the relative intensities and
+        ``LineGroup.ref_strength`` describe the *recorded* spectrum rather
+        than the emitted one.  Needed for K-beta/K-alpha and L-series ratios
+        whose lines differ in efficiency, and for :func:`number_ratio`.
+    matrix : xrf_matrix.MatrixModel, optional
+        Sample-aware strengths: primary fluorescence with self-absorption in
+        the layer (incident and emitted paths, at the model's geometry) plus
+        secondary fluorescence.  Carries its own incident spectrum, so
+        ``incident_spectrum`` and ``e0_eff_kev`` are ignored.  ``ref_strength``
+        then means sensitivity per unit mass fraction in that matrix.  Since
+        absorption and enhancement depend on the composition, use
+        :func:`xrf_matrix.quantify_layer` to iterate it to self-consistency.
     merge_within_ev
         If > 0, lines closer than this are merged into one effective line at
         their intensity-weighted mean energy.  Useful to collapse unresolvable
@@ -436,16 +591,33 @@ def element_line_groups(
                 e_ev = _line_energy_ev(z, macro)
                 if e_ev is None or not (emin_ev <= e_ev <= emax_ev):
                     continue
-                if incident_spectrum is None:
+                if matrix is not None:
+                    s = matrix.emission(z, macro, e_ev / 1000.0, secondary=False)
+                elif incident_spectrum is None:
                     s = _line_strength(z, macro, e0_eff_kev, weighting)
                 else:
                     s = _line_strength_spectral(z, macro, *incident_spectrum)
+                if detector is not None:
+                    s *= detector.efficiency(e_ev)
                 if s <= 0:
                     continue
                 found.append((name[:-5], e_ev, s))
 
             if not found:
                 continue
+
+            if matrix is not None and matrix.secondary_enabled:
+                # secondary fluorescence only for lines that can survive min_rel
+                s_max_p = max(s for _, _, s in found)
+                updated = []
+                for n, e, s in found:
+                    if s >= 0.5 * min_rel * s_max_p:
+                        s = matrix.emission(z, _LINE_MACROS[n + "_LINE"], e / 1000.0,
+                                            secondary=True)
+                        if detector is not None:
+                            s *= detector.efficiency(e)
+                    updated.append((n, e, s))
+                found = updated
 
             if merge_within_ev > 0:
                 found = _merge_close_lines(found, merge_within_ev)
@@ -456,7 +628,17 @@ def element_line_groups(
             lines.sort(key=lambda l: -l.rel)
 
             if lines:
-                groups.append(LineGroup(element=symbol, family=fam, lines=lines))
+                ref_strength = float(s_max)
+                if matrix is not None and "+" not in lines[0].name:
+                    # per unit mass fraction in the target layer (the emission
+                    # weighting above includes the stack composition)
+                    e_ref = lines[0].energy_ev
+                    ref_strength = matrix.sensitivity(z, _LINE_MACROS[lines[0].name + "_LINE"],
+                                                      e_ref / 1000.0)
+                    if detector is not None:
+                        ref_strength *= detector.efficiency(e_ref)
+                groups.append(LineGroup(element=symbol, family=fam, lines=lines,
+                                        ref_strength=float(ref_strength)))
                 logger.info("%s %s: %d lines, reference %s at %.0f eV",
                             symbol, fam, len(lines), lines[0].name, lines[0].energy_ev)
 
@@ -615,6 +797,81 @@ def counting_error(raw_spectra: np.ndarray, scale: np.ndarray) -> np.ndarray:
     return np.sqrt((raw[good] / s[good, None] ** 2).sum(axis=0)) / n
 
 
+def pileup_spectra(raw_spectra: np.ndarray, calibration: Calibration,
+                   real_time: np.ndarray | float = 1.0, chunk: int = 512) -> np.ndarray:
+    """Per-pixel pile-up spectra per second of resolving time.
+
+    For random arrivals, two events closer than the pulse-pair resolving time
+    ``tau`` are recorded as one event at ``E1 + E2``.  With ``N`` recorded
+    counts in a real time ``t``, the number of such pairs with sum energy ``E``
+    is::
+
+        N_pp(E) = (tau / t) * (x ⊗ x)(E)
+
+    where ``x`` is the measured spectrum and ``⊗`` the self-convolution over
+    ordered pairs.  This returns ``(x ⊗ x) / t`` mapped back onto the MCA
+    channel grid, so multiplying by ``tau`` (seconds) gives counts.
+
+    Details: the energy offset is accounted for (a sum of two channel energies
+    carries the offset twice), and the self-pair term is made unbiased
+    (``x_c (x_c - 1)`` instead of ``x_c^2``), which matters at low counts.
+
+    Pile-up removes the two parent events from their peaks with a probability
+    independent of their energy, so it does not bias line *ratios*; what it
+    does is put sum peaks in the spectrum, which other components would
+    otherwise absorb.
+
+    Parameters
+    ----------
+    raw_spectra : (n_pixels, n_channels) array
+        Raw counts over the **full** MCA range.
+    calibration : Calibration
+    real_time : float or (n_pixels,) array
+        Real (elapsed) acquisition time per pixel, s
+        (``xia_det0_elapsed_time`` on BM32).
+    chunk : int
+        Pixels per FFT batch, to bound memory.
+
+    Returns
+    -------
+    (n_pixels, n_channels) array
+    """
+    raw = np.atleast_2d(np.asarray(raw_spectra, dtype=float))
+    n_pix, n_ch = raw.shape
+    rt = np.broadcast_to(np.asarray(real_time, dtype=float), (n_pix,))
+    nfft = 1 << int(np.ceil(np.log2(2 * n_ch)))
+    # energy of conv index n is gain*n + 2*offset  ->  channel c = n + offset/gain
+    src = np.arange(n_ch) - calibration.offset / calibration.gain
+    n0 = np.floor(src).astype(int)
+    fr = src - n0
+    valid = (n0 >= 0) & (n0 + 1 < 2 * n_ch)
+    out = np.zeros((n_pix, n_ch))
+    for s in range(0, n_pix, chunk):
+        x = raw[s:s + chunk]
+        X = np.fft.rfft(x, nfft, axis=1)
+        conv = np.fft.irfft(X * X, nfft, axis=1)[:, :2 * n_ch]
+        conv[:, 0:2 * n_ch:2] -= x                     # unbiased self-pairs
+        np.clip(conv, 0.0, None, out=conv)             # FFT round-off
+        out[s:s + chunk, valid] = (conv[:, n0[valid]] * (1.0 - fr[valid])
+                                   + conv[:, n0[valid] + 1] * fr[valid])
+        out[s:s + chunk] /= rt[s:s + chunk, None]
+    return out
+
+
+def average_pileup_template(pileup: np.ndarray, scale: np.ndarray) -> np.ndarray:
+    """Pile-up template for the map-averaged spectrum, per µs of resolving time.
+
+    ``mean_i(P_i / s_i) * 1e-6`` with ``P_i`` from :func:`pileup_spectra` and
+    ``s_i`` the normalisation divisor: the same units as the averaged,
+    normalised spectrum.  The fitted amplitude is then ``tau`` in µs.  Using
+    the per-pixel spectra (not the average) matters: pile-up goes as the
+    *square* of the local rate.
+    """
+    s = np.asarray(scale, dtype=float)
+    good = np.isfinite(s) & (s > 0)
+    return (pileup[good] / s[good, None]).mean(axis=0) * 1e-6
+
+
 def snip_background(y: np.ndarray, width: int = 40, iterations: int = 24,
                     smooth: bool = True) -> np.ndarray:
     """SNIP (Statistics-sensitive Non-linear Iterative Peak-clipping) background.
@@ -698,12 +955,30 @@ class XRFModel:
         Free ``noise_ev`` and ``fano``.
     fit_gamma : bool
         Free ``gamma_ev``.
+    escape : bool
+        Add the sensor escape peaks of every line (:meth:`Detector.escape_lines`),
+        tied to the line's amplitude: no extra free parameter.  The group
+        amplitude then counts parent + escape, i.e. every photon absorbed in
+        the sensor, which is what ``Detector.efficiency`` describes.
+    pileup_template : (n_mca_channels,) array, optional
+        Pile-up spectrum per microsecond of pulse-pair resolving time, in the
+        units of the fitted data (see :func:`average_pileup_template`).
+    fit_pileup : bool
+        With a template: free ``pileup_tau_us`` (appended last) if True,
+        otherwise hold it at ``pileup_tau_us``.  The sum peaks of the main
+        lines usually lie above the analysis ROI, so the practical recipe is
+        to fit tau once over an extended range and fix it in the analysis fit.
+    pileup_tau_us : float
+        Fixed (or starting) pulse-pair resolving time, µs.
     """
 
     def __init__(self, groups: Sequence[LineGroup], calibration: Calibration,
                  detector: Detector, channels: np.ndarray,
                  background_order: Optional[int] = 1,
-                 fit_resolution: bool = True, fit_gamma: bool = True):
+                 fit_resolution: bool = True, fit_gamma: bool = True,
+                 escape: bool = False,
+                 pileup_template: Optional[np.ndarray] = None,
+                 fit_pileup: bool = True, pileup_tau_us: float = 0.2):
         if not groups:
             raise ValueError("At least one line group is required.")
         self.groups = list(groups)
@@ -713,6 +988,14 @@ class XRFModel:
         self.background_order = background_order
         self.fit_resolution = bool(fit_resolution)
         self.fit_gamma = bool(fit_gamma)
+        self.escape = bool(escape)
+        self.pileup = (None if pileup_template is None
+                       else np.asarray(pileup_template, dtype=float)[self.channels.astype(int)])
+        self.fit_pileup = bool(fit_pileup) and self.pileup is not None
+        self.fixed_pileup_tau_us = float(pileup_tau_us)
+        # escape companions per line, computed once
+        self._escapes = {(gi, li): (detector.escape_lines(l.energy_ev) if self.escape else [])
+                         for gi, g in enumerate(self.groups) for li, l in enumerate(g.lines)}
 
         self.energies = calibration.energy(self.channels)
 
@@ -728,6 +1011,8 @@ class XRFModel:
             names += ["noise_ev", "fano"]
         if self.fit_gamma:
             names += ["gamma_ev"]
+        if self.fit_pileup:
+            names += ["pileup_tau_us"]
         self.param_names: List[str] = names
 
     # -- parameter unpacking ------------------------------------------------
@@ -740,8 +1025,23 @@ class XRFModel:
             noise, fano = float(params[i]), float(params[i + 1]); i += 2
         else:
             noise, fano = self.detector.noise_ev, self.detector.fano
-        gamma = float(params[i]) if self.fit_gamma else self.detector.gamma_ev
+        if self.fit_gamma:
+            gamma = float(params[i]); i += 1
+        else:
+            gamma = self.detector.gamma_ev
         return bkg, amps, noise, fano, gamma
+
+    def pileup_tau_us(self, params: Sequence[float]) -> float:
+        """Pulse-pair resolving time (µs): fitted, fixed, or 0 without pile-up."""
+        if self.pileup is None:
+            return 0.0
+        return float(params[-1]) if self.fit_pileup else self.fixed_pileup_tau_us
+
+    def pileup_profile(self, params: Sequence[float]) -> np.ndarray:
+        """Modelled pile-up contribution over the ROI."""
+        if self.pileup is None:
+            return np.zeros_like(self.channels)
+        return self.pileup_tau_us(params) * self.pileup
 
     # -- evaluation ---------------------------------------------------------
 
@@ -764,16 +1064,24 @@ class XRFModel:
         gain = self.calibration.gain
         gamma_ch = gamma / gain
         out = np.zeros_like(self.channels)
-        for line in g.lines:
+        for li, line in enumerate(g.lines):
+            escapes = self._escapes[(index, li)]
+            parent = 1.0 - sum(f for _, f in escapes)
             sigma_ch = self.detector.sigma_ev(line.energy_ev, noise_ev=noise, fano=fano) / gain
             centre_ch = self.calibration.channel(line.energy_ev)
-            out += (amps[index] * line.rel) * voigt_profile(
+            out += (amps[index] * line.rel * parent) * voigt_profile(
                 self.channels - centre_ch, sigma_ch, gamma_ch)
+            for e_esc, f in escapes:
+                # the charge cloud corresponds to the deposited energy, so the
+                # escape peak has the resolution of E - E_X
+                s_esc = self.detector.sigma_ev(e_esc, noise_ev=noise, fano=fano) / gain
+                out += (amps[index] * line.rel * f) * voigt_profile(
+                    self.channels - self.calibration.channel(e_esc), s_esc, gamma_ch)
         return out
 
     def __call__(self, channels: np.ndarray, *params: float) -> np.ndarray:
         """Total model, in the signature ``curve_fit`` expects."""
-        total = self.background(params)
+        total = self.background(params) + self.pileup_profile(params)
         for i in range(len(self.groups)):
             total = total + self.group_profile(i, params)
         return total
@@ -819,6 +1127,10 @@ class XRFModel:
             p0 += [self.detector.gamma_ev]
             lo += [0.0]
             hi += [100.0]
+        if self.fit_pileup:
+            p0 += [self.fixed_pileup_tau_us]   # µs; pulse-pair resolution is typically 0.1-1 µs
+            lo += [0.0]
+            hi += [50.0]
 
         return p0, (lo, hi)
 
@@ -881,8 +1193,15 @@ def fit_average_spectrum(
     fit_resolution: bool = True,
     fit_gamma: bool = True,
     maxfev: int = 20000,
+    escape: bool = False,
+    pileup_template: Optional[np.ndarray] = None,
+    fit_pileup: bool = True,
+    pileup_tau_us: float = 0.2,
 ) -> FitResult:
     """Fit the constrained Voigt model to a single spectrum.
+
+    ``escape``, ``pileup_template``, ``fit_pileup`` and ``pileup_tau_us`` are
+    passed to :class:`XRFModel`.
 
     Parameters
     ----------
@@ -921,7 +1240,9 @@ def fit_average_spectrum(
 
     model = XRFModel(groups, calibration, detector, ch,
                      background_order=background_order,
-                     fit_resolution=fit_resolution, fit_gamma=fit_gamma)
+                     fit_resolution=fit_resolution, fit_gamma=fit_gamma,
+                     escape=escape, pileup_template=pileup_template,
+                     fit_pileup=fit_pileup, pileup_tau_us=pileup_tau_us)
     p0, bounds = model.initial_guess(yy)
 
     popt, pcov = curve_fit(model, ch, yy, p0=p0, bounds=bounds,
@@ -1029,6 +1350,56 @@ class MapResult:
         return r, dr
 
 
+def number_ratio(area_a, area_b, group_a: LineGroup, group_b: LineGroup,
+                 err_a=None, err_b=None):
+    """Atom-number ratio ``n_a / n_b`` from two fitted reference-line areas.
+
+    ::
+
+        n_a / n_b = (A_a / A_b) * (S_b * W_b) / (S_a * W_a)
+
+    with ``A`` the fitted **reference-line** area (``FitResult.areas`` or
+    ``MapResult.area_map(label)`` with the default ``total=False``), ``S`` the
+    group's ``ref_strength`` (mass cross-section x excitation x detection
+    efficiency) and ``W`` the atomic weight, which turns the mass
+    cross-section (cm^2/g) into a per-atom one.
+
+    Valid when both groups come from the same :func:`element_line_groups` call
+    configuration (same excitation, same detector) and matrix effects are
+    negligible or equal for the two lines.  Self-absorption and secondary
+    fluorescence are **not** included.
+
+    Parameters
+    ----------
+    area_a, area_b : float or array
+    group_a, group_b : LineGroup
+    err_a, err_b : float or array, optional
+        1-sigma errors of the areas, propagated as uncorrelated.
+
+    Returns
+    -------
+    ratio, ratio_err, k
+        ``ratio_err`` is None if no errors are given; ``k`` is the
+        sensitivity factor multiplying ``A_a / A_b``.
+    """
+    for g in (group_a, group_b):
+        if not np.isfinite(g.ref_strength) or g.ref_strength <= 0:
+            raise ValueError(f"{g.label}: ref_strength is not set; rebuild the groups "
+                             "with element_line_groups().")
+    w_a = xraylib.AtomicWeight(xraylib.SymbolToAtomicNumber(group_a.element))
+    w_b = xraylib.AtomicWeight(xraylib.SymbolToAtomicNumber(group_b.element))
+    k = (group_b.ref_strength * w_b) / (group_a.ref_strength * w_a)
+    a = np.asarray(area_a, dtype=float)
+    b = np.asarray(area_b, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = k * a / b
+        ratio_err = None
+        if err_a is not None and err_b is not None:
+            ratio_err = np.abs(ratio) * np.sqrt((np.asarray(err_a) / a) ** 2
+                                                + (np.asarray(err_b) / b) ** 2)
+    return ratio, ratio_err, float(k)
+
+
 def design_matrix(model: "XRFModel", shape_params: Sequence[float]) -> np.ndarray:
     """Columns of the linear model: background terms, then one per line group.
 
@@ -1068,6 +1439,7 @@ def fit_map(
     map_shape: Tuple[int, int],
     poisson_weights: bool = True,
     clip_negative: bool = False,
+    pileup: Optional[np.ndarray] = None,
 ) -> MapResult:
     """Solve the fixed-shape model for every pixel of a map, in one pass.
 
@@ -1098,6 +1470,13 @@ def fit_map(
         Clip negative fitted amplitudes to zero.  Off by default, because a
         negative amplitude is diagnostic of a mis-specified model or an
         over-flexible background and silently clipping it hides that.
+    pileup : (n_pixels, n_channels) array, optional
+        Per-pixel pile-up spectra from :func:`pileup_spectra` (full MCA
+        range).  If the model carries a pile-up term, ``tau`` is read from
+        ``shape_params`` and ``tau * pileup`` is subtracted from each pixel
+        before the solve (it is a known, pixel-specific component, so it does
+        not fit into the shared design matrix).  The Poisson weights still use
+        the raw counts, which include the pile-up events.
 
     Returns
     -------
@@ -1111,6 +1490,11 @@ def fit_map(
     good = np.isfinite(s) & (s > 0)
     s_safe = np.where(good, s, 1.0)
     y = raw / s_safe[:, None]
+    if model.pileup is not None:
+        if pileup is None:
+            raise ValueError("The model includes pile-up: pass the per-pixel `pileup` spectra.")
+        tau_s = model.pileup_tau_us(shape_params) * 1e-6
+        y = y - tau_s * np.asarray(pileup, dtype=float)[:, lo:hi] / s_safe[:, None]
 
     A = design_matrix(model, shape_params)                      # (n_ch, k)
     k = A.shape[1]
@@ -1272,8 +1656,13 @@ def plot_pixel_fits(
     logy: bool = True,
     show_components: bool = True,
     figsize_per_panel: Tuple[float, float] = (3.2, 2.6),
+    pileup: Optional[np.ndarray] = None,
 ):
     """Panel grid of individual pixel spectra with their fitted model.
+
+    If the model includes pile-up, pass the per-pixel ``pileup`` spectra (as
+    for :func:`fit_map`) so each panel shows its own pile-up rather than the
+    map average.
 
     Map-averaged residuals and a median chi2 both hide what a single spectrum
     actually looks like.  This is the direct check: at a glance you see whether
@@ -1328,6 +1717,9 @@ def plot_pixel_fits(
         params = pixel_parameters(model, map_result, shape_params, pix)
         bkg = model.background(params)
         total = model(model.channels, *params)
+        if model.pileup is not None and pileup is not None:
+            total = (total - model.pileup_profile(params)
+                     + model.pileup_tau_us(params) * 1e-6 * pileup[pix, lo:hi] / s[pix])
 
         ax.plot(x, y, color="0.25", lw=0.7, drawstyle="steps-mid", label="data")
         if show_components:
