@@ -1,0 +1,122 @@
+{
+  "file": "InPoSi_v2_center.h5",
+  "scan": 1,
+  "pixels_used": 6561,
+  "calibration": {
+    "gain_ev_per_channel": 10.032,
+    "offset_ev": -31.263
+  },
+  "detector": {
+    "material": "Si",
+    "noise_ev": 23.683234465199224,
+    "fano": 0.12,
+    "gamma_ev": 5.0
+  },
+  "elements": [
+    "In",
+    "Ga",
+    "As",
+    "Cu",
+    "Ni"
+  ],
+  "families": [
+    "K",
+    "L"
+  ],
+  "e0_eff_kev": 20.0,
+  "min_rel": 0.005,
+  "roi_channels": [
+    292,
+    1261
+  ],
+  "background_order": 3,
+  "chi2_red": 1827.8243255794166,
+  "residual_rms_percent_of_peak": 0.4193557992497298,
+  "parameters": {
+    "bkg_0": {
+      "value": 0.04779407558189284,
+      "stderr": 0.0015049033429871896
+    },
+    "bkg_1": {
+      "value": 0.39857936416125717,
+      "stderr": 0.004327356274474226
+    },
+    "bkg_2": {
+      "value": 2.954513104480878,
+      "stderr": 0.002890628891303002
+    },
+    "bkg_3": {
+      "value": 2.066435778743284,
+      "stderr": 0.005390062889623905
+    },
+    "A_InL": {
+      "value": 104.25894593223522,
+      "stderr": 0.1276602936869455
+    },
+    "A_GaK": {
+      "value": 16098.718057197533,
+      "stderr": 1.445154471807051
+    },
+    "A_AsK": {
+      "value": 33553.71458429788,
+      "stderr": 2.097680017421255
+    },
+    "A_CuK": {
+      "value": 9.422894546896329,
+      "stderr": 0.0755892630574546
+    },
+    "A_NiK": {
+      "value": 31.257551645326654,
+      "stderr": 0.08536167969417373
+    },
+    "noise_ev": {
+      "value": 25.97593725004206,
+      "stderr": 0.1574594750320507
+    },
+    "fano": {
+      "value": 0.16206735621677587,
+      "stderr": 0.0002099859469290445
+    },
+    "gamma_ev": {
+      "value": 12.385830415416546,
+      "stderr": 0.006213171621763854
+    }
+  },
+  "group_areas": {
+    "In L": {
+      "reference_line": "L3M5",
+      "reference_area": 104.25894593223522,
+      "reference_area_stderr": 0.1276602936869455,
+      "total_area": 218.8569953901179,
+      "n_lines": 13
+    },
+    "Ga K": {
+      "reference_line": "KL3",
+      "reference_area": 16098.718057197533,
+      "reference_area_stderr": 1.445154471807051,
+      "total_area": 27807.508626762883,
+      "n_lines": 4
+    },
+    "As K": {
+      "reference_line": "KL3",
+      "reference_area": 33553.71458429788,
+      "reference_area_stderr": 2.097680017421255,
+      "total_area": 58466.163266264055,
+      "n_lines": 5
+    },
+    "Cu K": {
+      "reference_line": "KL3",
+      "reference_area": 9.422894546896329,
+      "reference_area_stderr": 0.0755892630574546,
+      "total_area": 16.167645412627692,
+      "n_lines": 4
+    },
+    "Ni K": {
+      "reference_line": "KL3",
+      "reference_area": 31.257551645326654,
+      "reference_area_stderr": 0.08536167969417373,
+      "total_area": 53.664717998363244,
+      "n_lines": 4
+    }
+  }
+}
