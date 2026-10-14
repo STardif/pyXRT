@@ -76,7 +76,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import xraylib
@@ -114,6 +114,11 @@ __all__ = [
     "number_ratio",
     "pileup_spectra",
     "average_pileup_template",
+    "width_window",
+    "peak_width_profile",
+    "detect_steps",
+    "segment_labels",
+    "fit_segments",
     "pixel_parameters",
     "select_pixels",
     "plot_pixel_fits",
@@ -1051,13 +1056,15 @@ class XRFModel:
             return np.zeros_like(self.channels)
         return sum(c * self._u ** k for k, c in enumerate(bkg))
 
-    def group_profile(self, index: int, params: Sequence[float]) -> np.ndarray:
+    def group_profile(self, index: int, params: Sequence[float],
+                      sigma_scale: float = 1.0) -> np.ndarray:
         """Modelled counts of one line group (background excluded).
 
         Profiles are evaluated in *channel* space: ``voigt_profile`` integrates
         to 1 over its argument, so with widths expressed in channels the
         amplitude is directly the integrated number of counts summed over
-        channels — the same quantity the data carries.
+        channels — the same quantity the data carries.  ``sigma_scale``
+        multiplies every Gaussian width (used for the width-correction term).
         """
         _, amps, noise, fano, gamma = self._unpack(params)
         g = self.groups[index]
@@ -1067,14 +1074,14 @@ class XRFModel:
         for li, line in enumerate(g.lines):
             escapes = self._escapes[(index, li)]
             parent = 1.0 - sum(f for _, f in escapes)
-            sigma_ch = self.detector.sigma_ev(line.energy_ev, noise_ev=noise, fano=fano) / gain
+            sigma_ch = sigma_scale * self.detector.sigma_ev(line.energy_ev, noise_ev=noise, fano=fano) / gain
             centre_ch = self.calibration.channel(line.energy_ev)
             out += (amps[index] * line.rel * parent) * voigt_profile(
                 self.channels - centre_ch, sigma_ch, gamma_ch)
             for e_esc, f in escapes:
                 # the charge cloud corresponds to the deposited energy, so the
                 # escape peak has the resolution of E - E_X
-                s_esc = self.detector.sigma_ev(e_esc, noise_ev=noise, fano=fano) / gain
+                s_esc = sigma_scale * self.detector.sigma_ev(e_esc, noise_ev=noise, fano=fano) / gain
                 out += (amps[index] * line.rel * f) * voigt_profile(
                     self.channels - self.calibration.channel(e_esc), s_esc, gamma_ch)
         return out
@@ -1286,6 +1293,12 @@ class MapResult:
         reference-line area into the group's total modelled area.
     shape : tuple
         Map shape (n_slow, n_fast), for reshaping.
+    width_change : (n_pixels,) array or None
+        With ``width_correction=True``: relative change of the Gaussian width
+        of every line in the pixel, with respect to the fixed shape
+        (0.01 = 1 % broader), from the first-order width term.
+    segments : (n_pixels,) array or None
+        Segment label of each pixel when per-segment shapes were used.
     """
 
     group_labels: List[str]
@@ -1295,6 +1308,14 @@ class MapResult:
     chi2_red: np.ndarray
     total_rel: Dict[str, float]
     shape: Tuple[int, int]
+    width_change: Optional[np.ndarray] = None
+    segments: Optional[np.ndarray] = None
+
+    def width_change_map(self) -> np.ndarray:
+        """2D map of the relative width change (needs ``width_correction=True``)."""
+        if self.width_change is None:
+            raise ValueError("The map was fitted without width_correction.")
+        return self.width_change.reshape(self.shape)
 
     def area_map(self, label: str, total: bool = False) -> np.ndarray:
         """2D map of one group's area. ``total=True`` scales to the whole series."""
@@ -1435,11 +1456,13 @@ def fit_map(
     raw_spectra: np.ndarray,
     scale: np.ndarray,
     model: "XRFModel",
-    shape_params: Sequence[float],
+    shape_params,
     map_shape: Tuple[int, int],
     poisson_weights: bool = True,
     clip_negative: bool = False,
     pileup: Optional[np.ndarray] = None,
+    segments: Optional[np.ndarray] = None,
+    width_correction: bool = False,
 ) -> MapResult:
     """Solve the fixed-shape model for every pixel of a map, in one pass.
 
@@ -1477,6 +1500,21 @@ def fit_map(
         before the solve (it is a known, pixel-specific component, so it does
         not fit into the shared design matrix).  The Poisson weights still use
         the raw counts, which include the pile-up events.
+    segments : (n_pixels,) int array, optional
+        Segment label of every pixel (e.g. from :func:`segment_labels`).  With
+        ``shape_params`` given as ``{label: params}`` (e.g. from
+        :func:`fit_segments`), each segment is solved with its own line widths.
+        This is the exact treatment of an abrupt change of detector
+        resolution during the scan.
+    width_correction : bool
+        Add one first-order width term per pixel: the derivative of the
+        modelled peaks with respect to a common scaling of all Gaussian
+        widths, weighted by the shape amplitudes.  Its coefficient absorbs
+        small resolution changes (steps or drifts) pixel by pixel, which
+        otherwise bias the areas of overlapping peaks, and gives
+        ``MapResult.width_change``.  First order: valid for changes of a few
+        per cent, and assumes the relative group amplitudes stay close to
+        those of ``shape_params``.  Can be combined with ``segments``.
 
     Returns
     -------
@@ -1490,50 +1528,245 @@ def fit_map(
     good = np.isfinite(s) & (s > 0)
     s_safe = np.where(good, s, 1.0)
     y = raw / s_safe[:, None]
-    if model.pileup is not None:
-        if pileup is None:
-            raise ValueError("The model includes pile-up: pass the per-pixel `pileup` spectra.")
-        tau_s = model.pileup_tau_us(shape_params) * 1e-6
-        y = y - tau_s * np.asarray(pileup, dtype=float)[:, lo:hi] / s_safe[:, None]
 
-    A = design_matrix(model, shape_params)                      # (n_ch, k)
-    k = A.shape[1]
-
-    if poisson_weights:
-        W = (s_safe[:, None] ** 2) / np.maximum(raw, 1.0)
+    # one shape per segment (a single shape is one segment covering the map)
+    if isinstance(shape_params, Mapping):
+        if segments is None:
+            raise ValueError("shape_params given per segment: pass `segments` too.")
+        seg = np.asarray(segments)
+        shapes = {lab: np.asarray(p, dtype=float) for lab, p in shape_params.items()}
+        missing = set(np.unique(seg)) - set(shapes)
+        if missing:
+            raise ValueError(f"no shape parameters for segments {sorted(missing)}")
     else:
-        W = np.ones_like(y)
+        seg = np.zeros(n_pix, dtype=int)
+        shapes = {0: np.asarray(shape_params, dtype=float)}
 
-    # Stacked normal equations: (A^T W A) c = A^T W y, one k x k system per pixel.
-    AtWA = np.einsum("ck,pc,cl->pkl", A, W, A, optimize=True)
-    AtWy = np.einsum("ck,pc,pc->pk", A, W, y, optimize=True)
+    if model.pileup is not None and pileup is None:
+        raise ValueError("The model includes pile-up: pass the per-pixel `pileup` spectra.")
 
-    # Nudge the diagonal so an all-zero pixel does not make the solve singular;
-    # such pixels are flagged NaN below via `good`.
-    ridge = 1e-12 * np.trace(AtWA, axis1=1, axis2=2)[:, None, None] * np.eye(k)
-    coef = np.linalg.solve(AtWA + ridge, AtWy[..., None])[..., 0]
-    cov = np.linalg.inv(AtWA + ridge)
-    err = np.sqrt(np.clip(np.einsum("pkk->pk", cov), 0.0, None))
+    ng, nb = len(model.groups), model.n_bkg
+    k = nb + ng + (1 if width_correction else 0)
+    coef = np.full((n_pix, k), np.nan)
+    err = np.full((n_pix, k), np.nan)
+    chi2 = np.full(n_pix, np.nan)
+    width_change = np.full(n_pix, np.nan) if width_correction else None
 
-    resid = y - coef @ A.T
-    dof = max(n_ch - k, 1)
-    chi2 = np.einsum("pc,pc,pc->p", resid, W, resid) / dof
+    for lab, params in shapes.items():
+        sel = np.flatnonzero(seg == lab)
+        if sel.size == 0:
+            continue
+        ys = y[sel]
+        if model.pileup is not None:
+            tau_s = model.pileup_tau_us(params) * 1e-6
+            ys = ys - tau_s * np.asarray(pileup, dtype=float)[sel, lo:hi] / s_safe[sel, None]
+
+        A = design_matrix(model, params)                        # (n_ch, nb + ng)
+        if width_correction:
+            h = 0.02
+            dcol = sum((model.group_profile(j, params, sigma_scale=1.0 + h)
+                        - model.group_profile(j, params, sigma_scale=1.0 - h)) / (2.0 * h)
+                       for j in range(ng))
+            A = np.column_stack([A, dcol])
+
+        if poisson_weights:
+            W = (s_safe[sel, None] ** 2) / np.maximum(raw[sel], 1.0)
+        else:
+            W = np.ones_like(ys)
+
+        # Stacked normal equations: (A^T W A) c = A^T W y, one k x k system per pixel.
+        AtWA = np.einsum("ck,pc,cl->pkl", A, W, A, optimize=True)
+        AtWy = np.einsum("ck,pc,pc->pk", A, W, ys, optimize=True)
+        # Nudge the diagonal so an all-zero pixel does not make the solve singular;
+        # such pixels are flagged NaN below via `good`.
+        ridge = 1e-12 * np.trace(AtWA, axis1=1, axis2=2)[:, None, None] * np.eye(k)
+        c = np.linalg.solve(AtWA + ridge, AtWy[..., None])[..., 0]
+        cov = np.linalg.inv(AtWA + ridge)
+        coef[sel] = c
+        err[sel] = np.sqrt(np.clip(np.einsum("pkk->pk", cov), 0.0, None))
+        resid = ys - c @ A.T
+        chi2[sel] = np.einsum("pc,pc,pc->p", resid, W, resid) / max(n_ch - k, 1)
+
+        if width_correction:
+            # pixel model ~ lambda * (shape amplitudes) + delta * dcol, with
+            # delta = lambda * eps  ->  eps = delta / lambda; lambda is the
+            # least-squares projection of the pixel amplitudes on the shape ones
+            a_ref = np.asarray(params[nb:nb + ng], dtype=float)
+            lam = (c[:, nb:nb + ng] @ a_ref) / max(float(a_ref @ a_ref), 1e-300)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                width_change[sel] = c[:, -1] / lam
 
     coef[~good] = np.nan
     err[~good] = np.nan
     chi2[~good] = np.nan
+    if width_correction:
+        width_change[~good] = np.nan
     if clip_negative:
-        coef[:, model.n_bkg:] = np.clip(coef[:, model.n_bkg:], 0.0, None)
+        coef[:, nb:nb + ng] = np.clip(coef[:, nb:nb + ng], 0.0, None)
 
     return MapResult(
         group_labels=[g.label for g in model.groups],
-        areas=coef[:, model.n_bkg:],
-        area_errors=err[:, model.n_bkg:],
-        background=coef[:, :model.n_bkg],
+        areas=coef[:, nb:nb + ng],
+        area_errors=err[:, nb:nb + ng],
+        background=coef[:, :nb],
         chi2_red=chi2,
         total_rel={g.label: g.total_rel for g in model.groups},
         shape=tuple(map_shape),
+        width_change=width_change,
+        segments=None if len(shapes) == 1 and not isinstance(shape_params, Mapping) else seg,
     )
+
+
+# =============================================================================
+# Resolution stability: width profile, step detection, per-segment shapes
+# =============================================================================
+
+def width_window(groups: Sequence[LineGroup], areas: Mapping[str, float],
+                 detector: Detector, min_frac: float = 0.03,
+                 doublet_ev: float = 60.0) -> Tuple[float, float, str]:
+    """Pick a clean energy window around a strong, isolated line.
+
+    Candidates are the reference lines of the groups.  The window half-width
+    is ``min(2.5 FWHM, half the distance to the nearest interfering line)``.
+    A line interferes if its expected area (group area x rel) is at least
+    ``min_frac`` of the candidate's and it lies further than ``doublet_ev``
+    (unresolvable doublets such as K-alpha1/2 belong to the peak).  The
+    candidate with the most counts inside its window wins.
+
+    Returns
+    -------
+    (emin_ev, emax_ev, label)
+    """
+    from scipy.special import erf
+    all_lines = [(g.label, l.energy_ev, areas.get(g.label, 0.0) * l.rel)
+                 for g in groups for l in g.lines]
+    best = None
+    for g in groups:
+        e0 = g.reference.energy_ev
+        a0 = areas.get(g.label, 0.0)
+        others = [abs(e - e0) for _, e, a in all_lines
+                  if abs(e - e0) > doublet_ev and a >= min_frac * a0]
+        d = min(others) if others else np.inf
+        fwhm = float(detector.fwhm_ev(e0))
+        half = min(2.5 * fwhm, 0.5 * d)
+        captured = erf(half / (np.sqrt(2.0) * fwhm / 2.3548))     # Gaussian fraction inside
+        score = areas.get(g.label, 0.0) * captured * (half > 1.2 * fwhm)
+        if best is None or score > best[0]:
+            best = (score, e0 - half, e0 + half, g.label)
+    return best[1], best[2], best[3]
+
+
+def peak_width_profile(raw_spectra: np.ndarray, calibration: Calibration,
+                       window_ev: Tuple[float, float], bin_size: int) -> Dict[str, np.ndarray]:
+    """Peak centroid and rms width along the acquisition order.
+
+    Consecutive pixels (acquisition order, i.e. the flattened scan) are summed
+    in bins of ``bin_size`` (one map row = the number of fast-axis points), a
+    linear background between the window edges is removed, and the first and
+    second moments of the peak inside ``window_ev`` are computed per bin.
+    A detector-resolution change shows up as a step in the width; a gain or
+    offset change as a step in the centroid.  Insensitive to the per-pixel
+    normalisation.
+
+    Returns
+    -------
+    dict with ``width_ev``, ``centroid_ev``, ``counts`` and ``width_err_ev``
+    (statistical, Gaussian approximation), one value per bin.
+    """
+    raw = np.asarray(raw_spectra, dtype=float)
+    n_pix, n_ch = raw.shape
+    n_bins = n_pix // bin_size
+    binned = raw[:n_bins * bin_size].reshape(n_bins, bin_size, n_ch).sum(axis=1)
+    e = calibration.energy(np.arange(n_ch))
+    m = (e >= window_ev[0]) & (e <= window_ev[1])
+    x = e[m]
+    y = binned[:, m]
+    edge = max(2, m.sum() // 20)
+    left, right = y[:, :edge].mean(axis=1), y[:, -edge:].mean(axis=1)
+    bkg = left[:, None] + (right - left)[:, None] * (x - x[0]) / (x[-1] - x[0])
+    net = np.clip(y - bkg, 0.0, None)
+    n = net.sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        c = (net * x).sum(axis=1) / n
+        w = np.sqrt((net * (x - c[:, None]) ** 2).sum(axis=1) / n)
+        werr = w / np.sqrt(2.0 * n)
+    return dict(width_ev=w, centroid_ev=c, counts=n, width_err_ev=werr)
+
+
+def detect_steps(values: np.ndarray, window: int = 5, threshold: float = 6.0,
+                 min_step: float = 0.0) -> List[int]:
+    """Indices where a series jumps: a new level starts at each returned index.
+
+    For every index ``i`` the means of the ``window`` points after and before
+    it are compared, in units of the point-to-point noise (robust: from the
+    median absolute successive difference).  Local maxima of that statistic
+    above ``threshold`` and with ``|step| > min_step`` are returned.  Meant
+    for abrupt changes; a slow drift is better handled by the width term of
+    :func:`fit_map`.
+    """
+    v = np.asarray(values, dtype=float)
+    n = v.size
+    good = np.isfinite(v)
+    if good.sum() < 2 * window + 1:
+        return []
+    dv = np.diff(v[good])
+    sigma = 1.4826 * np.median(np.abs(dv - np.median(dv))) / np.sqrt(2.0)
+    if sigma <= 0:
+        sigma = np.std(v[good]) or 1.0
+    z = np.zeros(n)
+    step = np.zeros(n)
+    for i in range(window, n - window + 1):
+        a, b = v[i - window:i], v[i:i + window]
+        if np.isfinite(a).all() and np.isfinite(b).all():
+            step[i] = b.mean() - a.mean()
+            z[i] = abs(step[i]) / (sigma * np.sqrt(2.0 / window))
+    out = []
+    for i in range(window, n - window + 1):
+        lo, hi = max(0, i - window), min(n, i + window + 1)
+        if z[i] >= threshold and z[i] == z[lo:hi].max() and abs(step[i]) > min_step:
+            out.append(i)
+    return out
+
+
+def segment_labels(steps: Sequence[int], n_bins: int, bin_size: int,
+                   n_pixels: Optional[int] = None) -> np.ndarray:
+    """Per-pixel segment labels (0, 1, …) from bin indices where segments start."""
+    bins = np.zeros(n_bins, dtype=int)
+    for s in sorted(steps):
+        bins[s:] += 1
+    lab = np.repeat(bins, bin_size)
+    n_pixels = n_pixels or lab.size
+    if lab.size < n_pixels:                       # incomplete last bin
+        lab = np.concatenate([lab, np.full(n_pixels - lab.size, bins[-1])])
+    return lab[:n_pixels]
+
+
+def fit_segments(corrected: np.ndarray, raw_spectra: np.ndarray, scale: np.ndarray,
+                 segments: np.ndarray, groups: Sequence[LineGroup], calibration: Calibration,
+                 detector: Detector, roi: Tuple[int, int], pileup: Optional[np.ndarray] = None,
+                 **fit_kw) -> Dict[int, FitResult]:
+    """Average-spectrum fit of every segment, each with its own resolution.
+
+    The segment's average spectrum, counting error and (if ``pileup`` is
+    given) pile-up template are formed from its own pixels, and
+    :func:`fit_average_spectrum` is run with ``fit_kw`` (``yerr`` and
+    ``pileup_template`` are replaced).  Feed ``{label: r.popt}`` to
+    :func:`fit_map` together with the same ``segments``.
+    """
+    fit_kw = dict(fit_kw)
+    fit_kw.pop("yerr", None)
+    tmpl_given = fit_kw.pop("pileup_template", None)
+    out = {}
+    for lab in np.unique(segments):
+        idx = np.flatnonzero(segments == lab)
+        a_s, _, _ = average_spectrum(corrected[idx])
+        e_s = counting_error(raw_spectra[idx], scale[idx])
+        tmpl = tmpl_given
+        if pileup is not None and tmpl_given is not None:
+            tmpl = average_pileup_template(pileup[idx], scale[idx])
+        out[int(lab)] = fit_average_spectrum(a_s, groups, calibration, detector, roi, yerr=e_s,
+                                             pileup_template=tmpl, **fit_kw)
+    return out
 
 
 # =============================================================================
@@ -1590,13 +1823,17 @@ def identify_peaks(
 
 
 def pixel_parameters(model: "XRFModel", map_result: MapResult,
-                     shape_params: Sequence[float], pixel: int) -> np.ndarray:
+                     shape_params, pixel: int) -> np.ndarray:
     """Reassemble a full parameter vector for one pixel of a map fit.
 
     Takes the background coefficients and group amplitudes from the per-pixel
     linear solve, and the resolution parameters from the average-spectrum fit
-    that defined the fixed shape.
+    that defined the fixed shape (``shape_params`` may be ``{segment: params}``
+    for a map fitted per segment).  The first-order width term of
+    ``width_correction`` is not included.
     """
+    if isinstance(shape_params, Mapping):
+        shape_params = shape_params[map_result.segments[pixel]]
     p = np.array(shape_params, dtype=float)
     p[:model.n_bkg] = map_result.background[pixel]
     p[model.n_bkg:model.n_bkg + len(model.groups)] = map_result.areas[pixel]
