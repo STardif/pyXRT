@@ -36,6 +36,14 @@ Conventions and caveats
   is the same expression with one factor of E folded differently; feeding it a
   value in mA overestimates the flux by 1000.  The absolute scale cancels in
   every ratio computed here, but it matters if you ever quote absolute flux.)
+* **Per-bandwidth vs per-energy.**  A 0.1 % bandwidth is ``dE = 1e-3 * E``, so
+  the flux per unit energy is ``dN/dE = N_0.1%BW / (1e-3 * E)``.  Any integral
+  over ``dE`` (e.g. a flux-weighted cross-section ``int sigma(E) Phi(E) dE``)
+  must use the per-energy density, otherwise high energies are over-weighted
+  by a factor E.  Use :func:`per_unit_energy` (or
+  :meth:`Beamline.spectral_density`) for the conversion; ``xrf_fit`` applies
+  it internally to the per-0.1 %BW spectrum returned by
+  :meth:`Beamline.spectrum`.
 * ``G1`` is the **vertically integrated** spectral shape, so it is the right
   weighting only if the beamline accepts the full natural vertical opening
   angle.  With vertical collimation tighter than ~1/gamma you need the
@@ -44,10 +52,9 @@ Conventions and caveats
   roughness factor.  Synchrotron radiation is predominantly horizontally
   polarised and the mirrors here deflect vertically, so s-polarisation is the
   relevant case; at grazing incidence the two are indistinguishable anyway.
-* The default optics list below is taken from the earlier BM32 analysis
-  notebook and is **unverified** — mirror coating, grazing angles, window
-  thicknesses and the source field should be confirmed against the beamline
-  documentation before any quantitative use.
+* The default BM32 configuration (0.86 T bending magnet, four Ir-coated
+  mirrors, two 500 um Be windows, 3.3 m measured incident air path) was
+  confirmed in Oct 2026.  Mirror roughness is not known and is left at 0.
 
 Authors: Samuel Tardif, with Claude (Anthropic).
 """
@@ -75,6 +82,7 @@ __all__ = [
     "air_path",
     "air_density",
     "AIR_FORMULA",
+    "per_unit_energy",
 ]
 
 
@@ -94,12 +102,13 @@ class BendingMagnetSource:
         Dipole field.  Sets the critical energy, to which the high-energy
         spectrum is exponentially sensitive — confirm it for your source
         (an EBS two-pole wiggler is not the same as a standard EBS dipole).
+        Default 0.86 T: the BM32 bending magnet (confirmed Oct 2026).
     current_a : float
         Ring current in **amperes** (0.2 A = 200 mA).
     """
 
     ring_energy_gev: float = 6.04
-    magnetic_field_t: float = 0.85
+    magnetic_field_t: float = 0.86
     current_a: float = 0.2
 
     @property
@@ -176,11 +185,15 @@ class Mirror:
         r = np.abs((sin_t - q) / (sin_t + q)) ** 2
 
         if self.roughness_nm > 0:
-            # Nevot-Croce: R -> R * exp(-2 kz kz' sigma^2), approximated with
-            # kz = kz' = (2 pi / lambda) sin(theta).
+            # Nevot-Croce acts on the reflection *amplitude*:
+            #   r_s -> r_s * exp(-2 kz0 kz1 sigma^2),
+            # so the intensity factor is exp(-4 kz0 Re(kz1) sigma^2), with
+            # kz0 = k0 sin(theta) and kz1 = k0 q.  Below the critical angle
+            # Re(q) << sin(theta) (evanescent wave) and the factor -> 1; the
+            # Debye-Waller limit exp(-4 kz0^2 sigma^2) holds only well above it.
             lam_nm = 1.23984193 / e                      # keV -> nm
-            kz = 2.0 * np.pi * sin_t / lam_nm
-            r = r * np.exp(-2.0 * (kz * self.roughness_nm) ** 2)
+            k0 = 2.0 * np.pi / lam_nm
+            r = r * np.exp(-4.0 * k0 ** 2 * sin_t * np.real(q) * self.roughness_nm ** 2)
 
         return np.clip(r.real, 0.0, 1.0)
 
@@ -221,6 +234,16 @@ class Filter:
 
 
 OpticalElement = Union[Mirror, Filter]
+
+
+def per_unit_energy(energies_kev: np.ndarray, flux_01bw: np.ndarray) -> np.ndarray:
+    """Convert a per-0.1 %-bandwidth flux into a per-keV spectral density.
+
+    ``dN/dE = N_0.1%BW / (1e-3 * E)``: a fixed *relative* bandwidth spans an
+    energy interval proportional to E.  Integrals over ``dE`` need this form.
+    """
+    e = np.asarray(energies_kev, dtype=float)
+    return np.asarray(flux_01bw, dtype=float) / (1e-3 * np.maximum(e, 1e-12))
 
 
 # =============================================================================
@@ -311,6 +334,15 @@ class Beamline:
             transmitted = transmitted * t
         return raw, transmitted, transfers
 
+    def spectral_density(self, energies_kev: np.ndarray) -> np.ndarray:
+        """Flux at the sample per unit energy, photons/s/mrad/keV.
+
+        The quantity to integrate over ``dE``; see :func:`per_unit_energy`.
+        """
+        e = np.asarray(energies_kev, dtype=float)
+        _, transmitted, _ = self.spectrum(e)
+        return per_unit_energy(e, transmitted)
+
     def band_limits(self, energies_kev: np.ndarray, frac: float = 0.01) -> Tuple[float, float]:
         """Energies where the transmitted flux first and last exceed ``frac`` of its peak.
 
@@ -324,22 +356,27 @@ class Beamline:
         return float(e[above[0]]), float(e[above[-1]])
 
 
-#: BM32 white-beam configuration transcribed from the earlier analysis notebook.
+#: BM32 white-beam configuration.
 #:
-#: UNVERIFIED — four Ir-coated mirrors and two 500 um Be windows, with the
-#: grazing angles as written there.  Confirm against beamline documentation
-#: before using any absolute number derived from it.  The sample-side air path
-#: and the detector window are *not* included: they belong to the detection
-#: path, not the excitation path.
-def BM32_WHITE_BEAM(air_path_m: float = 3.0, temperature_c: float = 20.0,
+#: Confirmed (Oct 2026): 0.86 T bending-magnet source; four
+#: Ir-coated mirrors and two 500 um Be windows with the grazing angles below;
+#: 3.3 m of incident air path (measured).  The sample-side air path and the
+#: detector window are *not* included: they belong to the detection path
+#: (``xrf_fit.Detector.efficiency``), not the excitation path.
+#:
+#: Sensitivity: the Ga/As k-factor moves by ~7 % per metre of incident air
+#: and by ~2 % for a 10 % change in the mirror angles, because the flux between
+#: the Ga and As K edges (10.4-11.9 keV) is what separates the two.
+def BM32_WHITE_BEAM(air_path_m: float = 3.3, temperature_c: float = 20.0,
                     pressure_hpa: float = 1013.25, current_a: float = 0.2,
-                    magnetic_field_t: float = 0.85) -> Beamline:
+                    magnetic_field_t: float = 0.86) -> Beamline:
     """Default BM32 white-beam model (see module caveats).
 
     Parameters
     ----------
     air_path_m : float
-        Length of the **incident** air path, in metres.  Set to 0 to remove it.
+        Length of the **incident** air path, in metres (3.3 m measured on
+        BM32).  Set to 0 to remove it.
         This is the dominant low-energy filter on the line and it is what sets
         the ~5 keV lower bound of the usable band; the 1 mm of Be alone would
         pass energies well below that.
