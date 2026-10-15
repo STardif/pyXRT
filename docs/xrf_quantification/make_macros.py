@@ -62,6 +62,37 @@ m("BandOneLo", f(B["band1_kev"][0], 1)); m("BandOneHi", f(B["band1_kev"][1], 1))
 m("PeakBW", f(B["peak_bw_kev"], 1)); m("PeakKeV", f(B["peak_kev_kev"], 1))
 m("kBW", f(B["k_gaas_per_bw"], 3)); m("kKeV", f(B["k_gaas_per_kev"], 3))
 m("kJacobianBias", f(100 * (B["k_gaas_per_bw"] / B["k_gaas_per_kev"] - 1), 1))
+m("LorentzGamma", f(B["gamma"], 0)); m("InvGamma", f(B["inv_gamma_urad"], 1))
+for e0, L_ in (("5", "Five"), ("10", "Ten"), ("20", "Twenty"), ("30", "Thirty")):
+    m(f"FwhmPsi{L_}", f(B["fwhm_psi_urad"][e0], 0))
+m("CurrentMA", f(B["current_ma"], 1)); m("FillMode", B["filling_mode"])
+st = B["settings"]
+for k_, L_ in (("vg1", "VgOne"), ("hg1", "HgOne"), ("vg2", "VgTwo"), ("hg2", "HgTwo"), ("vg3", "VgThree"), ("hg3", "HgThree")):
+    m(f"Set{L_}", f(st[k_], 2))
+m("SetMaOne", f(st["ma1"], 3)); m("SetMaTwo", f(st["ma2"], 3))
+m("SetRmOne", f(st["mc1_km"], 1)); m("SetRmTwo", f(st["mc2_km"], 1))
+vl = {k.split(" ")[0]: v for k, v in B["v_limits"].items()}
+hl = {k.split(" ")[0]: v for k, v in B["h_limits"].items()}
+for k_, L_ in (("s1", "SOne"), ("m1", "MOne"), ("m2", "MTwo"), ("s2", "STwo"), ("s3", "SThree"), ("KB-V", "KBV")):
+    m(f"VAcc{L_}", f(vl[k_], 1))
+for k_, L_ in (("s1", "SOne"), ("s2", "STwo"), ("s3", "SThree"), ("KB-H", "KBH")):
+    m(f"HAcc{L_}", f(hl[k_], 1))
+m("VAcc", f(B["v_acc_urad"], 2)); m("HAcc", f(B["h_acc_urad"], 2))
+m("VLim", B["v_limited_by"].split(" ")[0]); m("HLim", B["h_limited_by"].split(" ")[0])
+m("FocMOne", f(B["focal_m1_m"], 0)); m("FocMTwo", f(B["focal_m2_m"], 0)); m("DivGain", f(B["divergence_gain"], 3))
+m("HeightKBV", f(B["height_per_urad_kbv"], 1))
+m("KBSpreadV", f(B["kb_spread_v_mrad"], 2)); m("KBSpreadH", f(B["kb_spread_h_mrad"], 2))
+m("KBBeamV", f(B["kb_beam_v_mm"], 2)); m("KBBeamH", f(B["kb_beam_h_mm"], 2))
+m("KBFootV", f(B["kb_footprint_v_mm"], 0)); m("KBFootH", f(B["kb_footprint_h_mm"], 0))
+m("PeakKeVFull", f(B["peak_kev_full"], 1)); m("MeanKeV", f(B["mean_kev"], 2)); m("MeanKeVFull", f(B["mean_kev_full"], 2))
+m("BandTenFullLo", f(B["band10_full_kev"][0], 1)); m("BandTenFullHi", f(B["band10_full_kev"][1], 1))
+m("kFull", f(B["k_gaas_full"], 3)); m("kSourceShift", f(100 * (B["k_gaas_per_kev"] / B["k_gaas_full"] - 1), 1))
+for o_, L_ in (("10.0", "Ten"), ("25.0", "TwentyFive"), ("50.0", "Fifty")):
+    m(f"Off{L_}", f(100 * (B["off_scan"][o_] / B["k_gaas_per_kev"] - 1), 2))
+m("FluxTwenty", num(B["flux_20kev_ph_s_bw"], 2))
+m("KBSpreadEffect", f(100 * (B["k_gaas_per_kev"] / B["k_gaas_no_kb_spread"] - 1), 2))
+m("AirForClosure", f(R["air_for_closure_cm"], 1))
+m("AccRatioLo", f(B["fwhm_psi_urad"]["30"] / B["v_acc_urad"], 0)); m("AccRatioHi", f(B["fwhm_psi_urad"]["5"] / B["v_acc_urad"], 0))
 
 # --- detector
 m("EffIn", f(DET["In La1"], 4)); m("EffGa", f(DET["Ga Ka1"], 3)); m("EffAs", f(DET["As Ka1"], 3))
@@ -123,15 +154,22 @@ for tn, L in (("0", "Zero"), ("100", "One"), ("200", "Two"), ("300", "Three"), (
 rows = []
 nom = R["sensitivity"]["nominal"]
 for lab, v in R["sensitivity"].items():
-    lab_tex = lab.replace("µm", "\\si{\\micro\\metre}").replace("°", "\\si{\\degree}")
+    lab_tex = (lab.replace("µm", "\\si{\\micro\\metre}").replace("°", "\\si{\\degree}")
+               .replace("µrad", "\\si{\\micro\\radian}").replace("ψ", "$\\psi$").replace("G1", "$G_1$"))
     rows.append(f"{lab_tex} & {v['Ga']:.4f} & \\num{{{(round(100 * (v['Ga'] / nom['Ga'] - 1), 1) + 0.0):+.1f}}} & {v['In']:.3f} & "
                 f"{v['Ga'] + v['In']:.3f} \\\\")
 out.append("\\newcommand{\\rSensitivityRows}{%\n" + "\n".join(rows) + "}")
-vals = [v["Ga"] for v in R["sensitivity"].values()]
+PLAUS = {k: v for k, v in R["sensitivity"].items() if not k.startswith("source G1")}
+vals = [v["Ga"] for v in PLAUS.values()]
 m("xGaMin", f(min(vals), 3)); m("xGaMax", f(max(vals), 3))
-cl = [v["Ga"] + v["In"] for v in R["sensitivity"].values()]
+cl = [v["Ga"] + v["In"] for v in PLAUS.values()]
 m("ClosureMin", f(min(cl), 2)); m("ClosureMax", f(max(cl), 2))
 S = R["sensitivity"]
+G1c = R["sensitivity"]["source G1 (all ψ)"]
+m("xGaGOne", f(G1c["Ga"], 4)); m("xInGOne", f(G1c["In"], 3)); m("ClosureGOne", f(G1c["Ga"] + G1c["In"], 3))
+m("GOneShift", f(100 * (R["quant"]["ratios"]["Ga"] / G1c["Ga"] - 1), 1))
+for k_, L_ in (("KB angles 2.5 mrad", "KBLo"), ("KB angles 3.5 mrad", "KBHi"), ("beam offset 25 µrad", "OffTF")):
+    m(f"xGa{L_}", f(R["sensitivity"][k_]["Ga"], 4)); m(f"Closure{L_}", f(R["sensitivity"][k_]["Ga"] + R["sensitivity"][k_]["In"], 3))
 m("ClosureAirLo", f(S["air 18 cm"]["Ga"] + S["air 18 cm"]["In"], 2))
 m("ClosureAirHi", f(S["air 22 cm"]["Ga"] + S["air 22 cm"]["In"], 2))
 

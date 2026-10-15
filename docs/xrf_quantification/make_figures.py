@@ -137,12 +137,48 @@ R["data"] = dict(n_pixels=int(n_pix), shape=[int(n_slow), int(n_fast)], step_um=
 print(f"data loaded ({time.time()-T0:.0f}s)")
 
 # ----------------------------------------------------------------------------- beam
-bl = XB.BM32_WHITE_BEAM()
+bl = XB.bm32_from_h5(H5)                                     # slits, mirrors, current of this scan
+bl_full = XB.bm32_from_h5(H5, vertical_acceptance="full", kb_angle_spread=False)   # pre-2026 model
 raw_flux, phi, transfers = bl.spectrum(E)
+raw_full, phi_full, _ = bl_full.spectrum(E)
 dens = XB.per_unit_energy(E, phi)
-R["beam"] = dict(field_t=bl.source.magnetic_field_t, ec_kev=bl.source.critical_energy_kev,
+dens_full = XB.per_unit_energy(E, phi_full)
+TRANS = np.prod([t for _, t in transfers], axis=0)            # optics incl. KB angle spread
+INFO = bl.describe()
+with h5py.File(H5, "r") as f:
+    FILL = f["1.1/instrument/machine/filling_mode"][()].decode()
+src = bl.source
+PSI = np.linspace(-600, 600, 2401)
+ADEN = src.angular_flux(E, PSI)
+fwhm_psi = {}
+for e0 in (5, 10, 20, 30):
+    w = ADEN[np.argmin(abs(E - e0))]
+    fwhm_psi[str(e0)] = float(np.ptp(PSI[w >= w.max() / 2]))
+Mv = INFO["vertical_height_per_urad_um"]                      # m per rad (= um per urad)
+lab_kbv = next(k for k in Mv if k.startswith("KB-V")); lab_kbh = next(k for k in INFO["kb_angle_spread_mrad"] if k.startswith("KB-H"))
+lab_m1 = next(k for k in Mv if k.startswith("m1")); lab_m2 = next(k for k in Mv if k.startswith("m2"))
+mir = {o.label: o for o in bl.optics if isinstance(o, XB.Mirror)}
+beam_v = INFO["vertical_acceptance_urad"] * 1e-6 * Mv[lab_kbv]
+beam_h = INFO["horizontal_acceptance_urad"] * 1e-6 * XB.BM32_LAYOUT["kbh"]
+R["beam"] = dict(field_t=src.magnetic_field_t, ec_kev=src.critical_energy_kev, gamma=src.gamma,
+                 inv_gamma_urad=1e6 / src.gamma, fwhm_psi_urad=fwhm_psi,
+                 current_ma=src.current_a * 1e3, filling_mode=FILL,
+                 settings={k: v for k, v in bl.settings.items() if isinstance(v, (int, float))},
+                 v_acc_urad=INFO["vertical_acceptance_urad"], v_limited_by=INFO["vertical_limited_by"],
+                 h_acc_urad=INFO["horizontal_acceptance_urad"], h_limited_by=INFO["horizontal_limited_by"],
+                 v_limits=INFO["vertical_limits_urad"], h_limits=INFO["horizontal_limits_urad"],
+                 focal_m1_m=mir[lab_m1].focal_length_m, focal_m2_m=mir[lab_m2].focal_length_m,
+                 height_per_urad_kbv=Mv[lab_kbv], divergence_gain=(Mv[lab_kbv] - Mv["s3"]) / (XB.BM32_LAYOUT["kbv"] - XB.BM32_LAYOUT["s3"]),
+                 kb_spread_v_mrad=INFO["kb_angle_spread_mrad"][lab_kbv], kb_spread_h_mrad=INFO["kb_angle_spread_mrad"][lab_kbh],
+                 kb_beam_v_mm=beam_v * 1e3, kb_beam_h_mm=beam_h * 1e3,
+                 kb_footprint_v_mm=beam_v / 3e-3 * 1e3, kb_footprint_h_mm=beam_h / 3e-3 * 1e3,
                  band10_kev=list(bl.band_limits(E, 0.10)), band1_kev=list(bl.band_limits(E, 0.01)),
+                 band10_full_kev=list(bl_full.band_limits(E, 0.10)),
                  peak_bw_kev=float(E[np.argmax(phi)]), peak_kev_kev=float(E[np.argmax(dens)]),
+                 peak_kev_full=float(E[np.argmax(dens_full)]),
+                 mean_kev=float(trapezoid(dens * E, E) / trapezoid(dens, E)),
+                 mean_kev_full=float(trapezoid(dens_full * E, E) / trapezoid(dens_full, E)),
+                 flux_20kev_ph_s_bw=float(phi[np.argmin(abs(E - 20))] * INFO["horizontal_acceptance_urad"] * 1e-3),
                  incident_air_m=3.3)
 
 
@@ -159,13 +195,24 @@ def k_gaas(weight):
 
 R["beam"]["k_gaas_per_bw"] = float(k_gaas(phi))
 R["beam"]["k_gaas_per_kev"] = float(k_gaas(dens))
+R["beam"]["k_gaas_full"] = float(k_gaas(dens_full))
+R["beam"]["k_gaas_no_kb_spread"] = float(k_gaas(XB.bm32_from_h5(H5, kb_angle_spread=False).spectral_density(E)))
+ACC = np.array([1, 2, 5, 10, 20, 40, 80, 150, 300, 600, 1200])
+OFFS = (0.0, 20.0, 40.0)
+R["beam"]["acc_scan"] = dict(acc_urad=ACC.tolist(), offsets_urad=list(OFFS), k={
+    str(o): [float(k_gaas(XB.per_unit_energy(E, src.accepted_flux(E, a, o, n_angles=241) * TRANS))) for a in ACC]
+    for o in OFFS})
+R["beam"]["off_scan"] = {str(o): float(k_gaas(XB.per_unit_energy(E, src.accepted_flux(E, INFO["vertical_acceptance_urad"], o) * TRANS)))
+                         for o in (10.0, 25.0, 50.0)}
 
 fig, axs = plt.subplots(1, 3, figsize=(TEXTW, 2.1), gridspec_kw={"wspace": 0.45})
 ax = axs[0]
-ax.plot(E, raw_flux / raw_flux.max(), "--", color="0.3", label="source")
+ax.plot(E, raw_full / raw_full.max(), ":", color="0.55", label="source, all ψ (G$_1$)")
+ax.plot(E, raw_flux / raw_flux.max(), "--", color="0.2", label="source, accepted (ψ ≈ 0)")
 ax.plot(E, phi / raw_flux.max(), color=C["model"], label="at the sample")
 ax.set_xlabel("photon energy (keV)"); ax.set_ylabel("flux per 0.1 % BW (rel.)")
-ax.set_title("Bending-magnet spectrum"); ax.legend(loc="upper right"); panel(ax, "a")
+ax.set_ylim(0, 1.6)
+ax.set_title("Bending-magnet spectrum"); ax.legend(loc="upper center", fontsize=5.6, ncol=1, borderaxespad=0.2); panel(ax, "a")
 ax = axs[1]
 comb, cnt = {}, {}
 for lab, t in transfers:
@@ -180,13 +227,54 @@ ax.legend(fontsize=5.5, loc="upper center", bbox_to_anchor=(0.5, -0.3), ncol=2)
 ax = axs[2]
 ax.plot(E, phi / phi.max(), color="0.5", label="per 0.1 % BW")
 ax.plot(E, dens / dens.max(), color=C["accent"], label="per keV")
+ax.plot(E, dens_full / dens_full.max(), ":", color=C["accent"], lw=0.9, label="per keV, G$_1$ source")
 for z in (31, 33):
     ax.axvline(xraylib.EdgeEnergy(z, xraylib.K_SHELL), color="0.6", lw=0.6, ls=":")
 ax.text(12.5, 0.06, "Ga, As K edges", fontsize=6, color="0.4", va="bottom", ha="left")
-ax.set_xlim(3, 40); ax.set_ylim(0, 1.3)
+ax.set_xlim(3, 40); ax.set_ylim(0, 1.6)
 ax.set_xlabel("photon energy (keV)"); ax.set_ylabel("normalised")
-ax.set_title("Bandwidth Jacobian"); ax.legend(loc="upper right", bbox_to_anchor=(1.02, 0.92)); panel(ax, "c")
+ax.set_title("Bandwidth Jacobian"); ax.legend(loc="upper center", fontsize=5.6, borderaxespad=0.2); panel(ax, "c")
 save(fig, "fig03_beam")
+
+fig, axs = plt.subplots(1, 3, figsize=(TEXTW, 2.3), gridspec_kw={"wspace": 0.42, "width_ratios": [1.15, 1, 1]})
+ax = axs[0]
+L_ = XB.BM32_LAYOUT
+zpos = {"s1": L_["s1"], lab_m1: L_["m1"], lab_m2: L_["m2"], "s2": L_["s2"], "s3": L_["s3"], lab_kbv: L_["kbv"]}
+short = lambda k: k.split(" Ir")[0]
+for k, z in zpos.items():
+    v = INFO["vertical_limits_urad"].get(k)
+    if v is not None:
+        ax.semilogy([z, z], [0.5, v], color=C["accent"], lw=2.2, solid_capstyle="butt")
+        dz = {"m1": -0.9, "m2": 0.9, "s3": -1.0, "KB-V": 0.6}.get(short(k), 0.0)
+        ax.text(z + dz, v * 1.25, short(k), ha="center", va="bottom", fontsize=5.8, color=C["accent"])
+for k, v in INFO["horizontal_limits_urad"].items():
+    z = {"s1": L_["s1"], "s2": L_["s2"], "s3": L_["s3"]}.get(k, L_["kbh"])
+    ax.semilogy([z + 0.45], [v], "s", ms=3, color=C["Ga"])
+ax.axhline(fwhm_psi["20"], color="0.4", lw=0.7, ls="--")
+ax.text(37.0, fwhm_psi["20"] * 1.12, "FWHM, 20 keV", fontsize=5.6, color="0.3")
+ax.axhline(1e6 / src.gamma, color="0.6", lw=0.6, ls=":")
+ax.text(37.0, 1e6 / src.gamma * 0.62, "1/γ", fontsize=5.6, color="0.4")
+ax.plot([], [], color=C["accent"], lw=2, label="vertical"); ax.plot([], [], "s", ms=3, color=C["Ga"], label="horizontal")
+ax.set_xlim(25, 46); ax.set_ylim(1, 1500); ax.set_xlabel("distance from source (m)")
+ax.set_ylabel("acceptance at source (µrad)"); ax.set_title("Apertures")
+ax.legend(loc="lower left", fontsize=5.6, bbox_to_anchor=(0.47, 0.0)); panel(ax, "a")
+ax = axs[1]
+for e0, col in ((5, C["In"]), (10, C["As"]), (20, C["Ga"]), (30, C["model"])):
+    w = ADEN[np.argmin(abs(E - e0))]
+    ax.plot(PSI, w / w.max(), color=col, label=f"{e0} keV")
+a3 = INFO["vertical_acceptance_urad"]
+ax.axvspan(-a3 / 2, a3 / 2, color="0.75", lw=0, label=f"s3: {a3:.1f} µrad")
+ax.set_xlim(-300, 300); ax.set_ylim(0, 1.5); ax.set_xlabel("vertical angle ψ (µrad)"); ax.set_ylabel("angular density (rel.)")
+ax.set_title("Vertical emission"); ax.legend(loc="upper center", fontsize=5.6, ncol=3, columnspacing=0.8, handlelength=1.2); panel(ax, "b")
+ax = axs[2]
+k0 = R["beam"]["k_gaas_full"]
+for o, ls in zip(OFFS, ("-", "--", ":")):
+    ax.semilogx(ACC, 100 * (np.array(R["beam"]["acc_scan"]["k"][str(o)]) / k0 - 1), ls, marker="o", ms=2.5,
+                color=C["Ga"], label=f"offset {o:.0f} µrad")
+ax.axvline(a3, color="0.5", lw=0.6, ls="--"); ax.axhline(0, color="0.7", lw=0.5)
+ax.set_xlabel("vertical acceptance (µrad)"); ax.set_ylabel("change of Ga/As sensitivity (%)")
+ax.set_title("Effect on Ga/As"); ax.legend(loc="lower left", fontsize=5.8); panel(ax, "c")
+save(fig, "fig03b_acceptance")
 print(f"beam ({time.time()-T0:.0f}s)")
 
 # ----------------------------------------------------------------------------- detector
@@ -341,8 +429,9 @@ R["quant"]["no_matrix"] = {el: float(XF.number_ratio(rr.areas[l], rr.areas[REF],
                            for el, l in (("Ga", "Ga K"), ("In", "In L"))}
 
 
-def requant(detector=DET, geometry=GEOM, stack=None, target=TARGET):
-    mm = XM.MatrixModel(stack or Q["matrix"].stack, geometry, E, phi, target=target)
+def requant(detector=DET, geometry=GEOM, stack=None, target=TARGET, spectrum=None):
+    mm = XM.MatrixModel(stack or Q["matrix"].stack, geometry, E, phi if spectrum is None else spectrum,
+                        target=target)
     return {k: float(v) for k, v in XM.quantify_layer(res.areas, GQ, mm, detector, REF, ANALYTES)["ratios"].items()}
 
 
@@ -357,8 +446,15 @@ cases = [("nominal", {}),
          ("cap 30 nm", dict(stack=ST.replace(0, ST[0].with_thickness(0.03)))),
          ("cap 70 nm", dict(stack=ST.replace(0, ST[0].with_thickness(0.07)))),
          ("no cap", dict(stack=XM.Stack([ST[1], ST[2]]), target=0)),
-         ("990 hPa", dict(detector=dataclasses.replace(DET, air_pressure_hpa=990.0)))]
+         ("990 hPa", dict(detector=dataclasses.replace(DET, air_pressure_hpa=990.0))),
+         ("source G1 (all ψ)", dict(spectrum=phi_full)),
+         ("beam offset 25 µrad", dict(spectrum=XB.bm32_from_h5(H5, vertical_offset_urad=25.0).spectrum(E)[1])),
+         ("KB angles 2.5 mrad", dict(spectrum=XB.bm32_from_h5(H5, kbv_angle_mrad=2.5, kbh_angle_mrad=2.5).spectrum(E)[1])),
+         ("KB angles 3.5 mrad", dict(spectrum=XB.bm32_from_h5(H5, kbv_angle_mrad=3.5, kbh_angle_mrad=3.5).spectrum(E)[1]))]
 R["sensitivity"] = {lab: requant(**kwc) for lab, kwc in cases}
+from scipy.optimize import brentq
+_clos = lambda x: (lambda r: r["Ga"] + r["In"] - 1.0)(requant(detector=dataclasses.replace(DET, air_path_cm=x)))
+R["air_for_closure_cm"] = float(brentq(_clos, 12.0, 20.0, xtol=0.01))
 R["cap_scan"] = {}
 for tn in (0, 100, 200, 300, 400, 500):
     st = XM.Stack([ST[1], ST[2]]) if tn == 0 else ST.replace(0, ST[0].with_thickness(tn / 1000))
@@ -482,7 +578,7 @@ for y, t in main:
     box(36, y, 28, 6, t, fc="#eaf2f8" if ("fit" in t or "composition" in t) else "#f4f6f7")
 for (y0, _), (y1, _) in zip(main[:-1], main[1:]):
     arrow(50, y0 - 0.6, 50, y1 + 6.6)
-for y, t, tgt in ((40, "Beam model\nbending magnet, Ir mirrors,\nBe windows, 3.3 m air\n→ spectral density dΦ/dE", 32.5),
+for y, t, tgt in ((40, "Beam model\nbending magnet, slit acceptance,\nIr mirrors, Be, 3.3 m air\n→ spectral density dΦ/dE", 32.5),
                   (21, "Fundamental parameters\nKissel cross sections,\nfluorescence yields,\nCoster–Kronig transitions", 29.5)):
     box(0.5, y, 28, 11, t, fc="#fdf2e9"); arrow(29.3, y + 5.5, 35.4, tgt)
 for y, t, tgt in ((40, "Detector model\nFano resolution, Voigt shape,\nSi escape, pile-up,\nefficiency (air, C, Si)", 32.5),
@@ -647,7 +743,7 @@ save(fig, "fig09_maps")
 # --- fig 10: sensitivity
 labs = [k for k in R["sensitivity"] if k != "nominal"]
 nom = R["sensitivity"]["nominal"]
-fig, axs = plt.subplots(1, 2, figsize=(TEXTW, 2.5), sharey=True, gridspec_kw={"wspace": 0.08})
+fig, axs = plt.subplots(1, 2, figsize=(TEXTW, 3.3), sharey=True, gridspec_kw={"wspace": 0.08})
 yy = np.arange(len(labs))
 for ax, key, ttl in ((axs[0], "Ga", "$n_{Ga}/n_{As}$"), (axs[1], "closure", "$(n_{Ga}+n_{In})/n_{As}$")):
     val = [R["sensitivity"][k]["Ga"] + (R["sensitivity"][k]["In"] if key == "closure" else 0) for k in labs]
