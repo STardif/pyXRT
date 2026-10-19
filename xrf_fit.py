@@ -747,6 +747,19 @@ def normalise_spectra(
     return spectra / safe[:, None], scale
 
 
+def _pixel_rows(spectra: np.ndarray, name: str = "spectra") -> np.ndarray:
+    """Spectra as a (n_pixels, n_channels) float array, whatever the scan shape.
+
+    The last axis is the channel axis; every leading axis is a pixel axis, so a
+    single spectrum (n_channels,), a list of pixels (n_pixels, n_channels) and a
+    gridded map (n_slow, n_fast, n_channels) are all accepted.
+    """
+    arr = np.asarray(spectra, dtype=float)
+    if arr.ndim == 0 or arr.shape[-1] == 0:
+        raise ValueError(f"{name} must have a channel axis; got shape {arr.shape}.")
+    return arr.reshape(-1, arr.shape[-1])
+
+
 def average_spectrum(corrected: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int]:
     """Map-averaged spectrum and the standard error of that mean.
 
@@ -755,20 +768,36 @@ def average_spectrum(corrected: np.ndarray) -> Tuple[np.ndarray, np.ndarray, int
     genuine pixel-to-pixel variation, and needs no assumption about how the
     normalisation transformed the Poisson variance.
 
+    Works for any scan shape: a single-point measurement (``ct``), a line scan
+    or a map, gridded or not (see ``_pixel_rows``).
+
+    Parameters
+    ----------
+    corrected : (n_channels,), (n_pixels, n_channels) or (..., n_channels) array
+        Normalised spectra, e.g. from :func:`normalise_spectra`.
+
     Returns
     -------
     mean, sem : (n_channels,) arrays
+        With a single valid spectrum, ``mean`` is that spectrum and ``sem`` is
+        NaN: there is no pixel-to-pixel spread to estimate. Use
+        :func:`counting_error` for the fit weights, as for a map.
     n_used : int
-        Number of pixels contributing (NaN rows are dropped).
+        Number of pixels contributing (pixels containing NaN are dropped).
     """
-    corrected = np.asarray(corrected, dtype=float)
-    good = np.isfinite(corrected).all(axis=1)
-    data = corrected[good]
-    if data.shape[0] < 2:
-        raise ValueError("Need at least 2 valid pixels to form a mean and its error.")
+    data = _pixel_rows(corrected, "corrected")
+    data = data[np.isfinite(data).all(axis=1)]
+    n = data.shape[0]
+    if n == 0:
+        raise ValueError("No valid pixel: every spectrum contains NaN or inf.")
     mean = data.mean(axis=0)
-    sem = data.std(axis=0, ddof=1) / np.sqrt(data.shape[0])
-    return mean, sem, int(data.shape[0])
+    if n == 1:
+        logger.info("Single spectrum: the standard error across pixels is undefined (NaN); "
+                    "use counting_error() for the uncertainty.")
+        sem = np.full_like(mean, np.nan)
+    else:
+        sem = data.std(axis=0, ddof=1) / np.sqrt(n)
+    return mean, sem, int(n)
 
 
 def counting_error(raw_spectra: np.ndarray, scale: np.ndarray) -> np.ndarray:
@@ -786,9 +815,9 @@ def counting_error(raw_spectra: np.ndarray, scale: np.ndarray) -> np.ndarray:
 
     Parameters
     ----------
-    raw_spectra : (n_pixels, n_channels) array
+    raw_spectra : (n_channels,), (n_pixels, n_channels) or (..., n_channels) array
         **Raw** counts, before normalisation.
-    scale : (n_pixels,) array
+    scale : scalar or array with one value per pixel
         The divisor applied by :func:`normalise_spectra`.
 
     Returns
@@ -796,8 +825,12 @@ def counting_error(raw_spectra: np.ndarray, scale: np.ndarray) -> np.ndarray:
     (n_channels,) array
         1-sigma uncertainty, in the same units as the normalised average.
     """
-    raw = np.asarray(raw_spectra, dtype=float)
-    s = np.asarray(scale, dtype=float)
+    raw = _pixel_rows(raw_spectra, "raw_spectra")
+    s = np.asarray(scale, dtype=float).reshape(-1)
+    if s.size == 1:
+        s = np.full(raw.shape[0], s[0])
+    if s.size != raw.shape[0]:
+        raise ValueError(f"scale has {s.size} values for {raw.shape[0]} spectra.")
     good = np.isfinite(s) & (s > 0)
     if not good.any():
         raise ValueError("No pixel has a valid normalisation scale.")
