@@ -691,24 +691,29 @@ class BlissScan:
                     sources.append(FrameSource(path, vs.dset_name, s0 + k))
         return sources
 
-    def read_frame(self, index: int, detector: Optional[str] = None) -> np.ndarray:
-        """One detector frame by point index (through the master file)."""
+    def read_frame(self, index: int, detector: Optional[str] = None,
+                   roi: Optional[Tuple[slice, slice]] = None) -> np.ndarray:
+        """One detector frame by point index (through the master file).
+        `roi` = (row slice, column slice) returns only that part of the frame."""
         detector = self._pick_detector(detector)
         if detector is None:
             raise KeyError(f"No image detector in scan {self.scan_key}.")
         with _open(self.h5_filepath) as f:
-            return f[f"{self.scan_key}/measurement/{detector}"][index]
+            dset = f[f"{self.scan_key}/measurement/{detector}"]
+            return dset[(index,) + tuple(roi)] if roi is not None else dset[index]
 
     def iter_frames(self, detector: Optional[str] = None,
-                    indices: Optional[Sequence[int]] = None) -> Iterator[np.ndarray]:
-        """Frames one at a time, keeping the file open."""
+                    indices: Optional[Sequence[int]] = None,
+                    roi: Optional[Tuple[slice, slice]] = None) -> Iterator[np.ndarray]:
+        """Frames one at a time, keeping the file open (faster than repeated
+        `read_frame` calls). `roi` as in `read_frame`."""
         detector = self._pick_detector(detector)
         if detector is None:
             return
         with _open(self.h5_filepath) as f:
             dset = f[f"{self.scan_key}/measurement/{detector}"]
             for i in (range(dset.shape[0]) if indices is None else indices):
-                yield dset[i]
+                yield dset[(i,) + tuple(roi)] if roi is not None else dset[i]
 
     def _process_images(self) -> None:
         """Fill `image_path_list` (image files in acquisition order) and
