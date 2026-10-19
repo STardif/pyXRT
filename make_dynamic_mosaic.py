@@ -53,10 +53,68 @@ def read_image(filepath: Path) -> np.ndarray:
     raise ValueError(f"Unsupported file format: {filepath}")
 
 
+def roi_slices(roi_x: int, roi_y: int, hws: int) -> Tuple[slice, slice]:
+    """(row, column) slices of the ROI in a detector frame."""
+    return (slice(roi_y - hws, roi_y + hws + 1), slice(roi_x - hws, roi_x + hws + 1))
+
+
 def get_image_roi(filepath: Path, roi_x: int, roi_y: int, hws: int) -> np.ndarray:
-    """Extracts a Region of Interest from the given image."""
+    """Extracts a Region of Interest from an image file (one frame per file).
+    Only used when the master file gives no direct access to the frames."""
     data = read_image(filepath)
-    return data[roi_y - hws : roi_y + hws + 1, roi_x - hws : roi_x + hws + 1]
+    return data[roi_slices(roi_x, roi_y, hws)]
+
+
+# Set once in each worker process, so the scan is not sent with every task.
+_WORKER_SCAN = None
+
+
+def _init_worker(scan: BlissMeshScan) -> None:
+    global _WORKER_SCAN
+    _WORKER_SCAN = scan
+
+
+def _read_roi_batch(indices: List[int], roi: Tuple[slice, slice]) -> List[np.ndarray]:
+    """ROIs of a batch of frames, read through the master file opened once."""
+    return list(_WORKER_SCAN.iter_frames(indices=indices, roi=roi))
+
+
+def read_rois(scan: BlissMeshScan, roi: Tuple[slice, slice], batch: int = 50) -> List[np.ndarray]:
+    """ROI of every recorded frame, in acquisition order, read in parallel."""
+    n = scan.nb_frames
+    batches = [list(range(i, min(i + batch, n))) for i in range(0, n, batch)]
+    rois: List[np.ndarray] = []
+    with mp.Pool(min(mp.cpu_count(), len(batches)), initializer=_init_worker,
+                 initargs=(scan,)) as pool:
+        with tqdm(total=n) as bar:
+            for out in pool.imap(partial(_read_roi_batch, roi=roi), batches):
+                rois.extend(out)
+                bar.update(len(out))
+    return rois
+
+
+def fill_missing_positions(grid: np.ndarray) -> np.ndarray:
+    """Motor positions of points never recorded (aborted scan) are NaN, which
+    pcolormesh/quiver refuse. Fill them from a plane fitted to the recorded
+    positions (a mesh is linear in row and column index)."""
+    missing = ~np.isfinite(grid)
+    if not missing.any():
+        return grid
+    rows, cols = np.indices(grid.shape)
+    design = np.column_stack([np.ones(grid.size), rows.ravel(), cols.ravel()])
+    ok = ~missing.ravel()
+    coef, *_ = np.linalg.lstsq(design[ok], grid.ravel()[ok], rcond=None)
+    filled = grid.copy()
+    filled[missing] = (design @ coef).reshape(grid.shape)[missing]
+    return filled
+
+
+def to_scan_grid(rois: List[np.ndarray], index_grid: np.ndarray) -> List[np.ndarray]:
+    """Order the ROIs like the scan grid (row-major), using the scan's index grid.
+    Handles back-and-forth meshes; points never recorded (aborted scan) become
+    empty (zero) blocks."""
+    empty = np.zeros_like(rois[0])
+    return [rois[i] if 0 <= i < len(rois) else empty for i in index_grid.ravel()]
 
 
 def compute_pipeline_data(
@@ -234,18 +292,19 @@ def main() -> None:
         image_suffix=args.image_suffix
     )
     scan.read_data(extra_counters=["mon",])
-    
-    if scan.nb_images == 0:
+    print(scan.summary())
+
+    if scan.nb_frames == 0:
         raise RuntimeError(f"No images found for scan {args.scan} in {scan.scan_folder}")
 
     # Determine which motors to use for X and Y plotting based on names
-    motor_names = [scan.fast_motor_name, scan.slow_motor_name]
-    x_motor = next((m for m in motor_names if 'x' in m.lower()), scan.fast_motor_name)
-    y_motor = next((m for m in motor_names if 'y' in m.lower()), scan.slow_motor_name)
-    
-    x_grid = scan.grids[x_motor]
-    y_grid = scan.grids[y_motor]
-    
+    x_motor = next((m for m in (scan.fast_motor_name, scan.slow_motor_name) if 'x' in m.lower()),
+                   scan.fast_motor_name)
+    y_motor = scan.slow_motor_name if x_motor == scan.fast_motor_name else scan.fast_motor_name
+
+    x_grid = fill_missing_positions(scan.grids[x_motor])
+    y_grid = fill_missing_positions(scan.grids[y_motor])
+
     # Attempt to use the actual monitor grid; fallback to ones if missing
     if "mon" in scan.grids:
         mon_grid = scan.grids["mon"]
@@ -253,22 +312,29 @@ def main() -> None:
         print("Warning: 'mon' counter not found. Falling back to unnormalized intensity.")
         mon_grid = np.ones_like(x_grid)
 
-    worker_func = partial(
-        get_image_roi, 
-        roi_x=args.roi_x, 
-        roi_y=args.roi_y, 
-        hws=args.hws
-    )
+    print(f"Extracting ROIs in parallel from {scan.nb_frames} frames...")
+    roi = roi_slices(args.roi_x, args.roi_y, args.hws)
+    if scan.frame_sources():
+        rois = read_rois(scan, roi)
+    else:
+        # No virtual dataset in the master file (e.g. TIFF images): one file per frame.
+        worker_func = partial(get_image_roi, roi_x=args.roi_x, roi_y=args.roi_y, hws=args.hws)
+        with mp.Pool(mp.cpu_count()) as pool:
+            rois = list(tqdm(pool.imap(worker_func, scan.image_path_list, chunksize=50),
+                             total=scan.nb_images))
 
-    print(f"Extracting ROIs in parallel from {scan.nb_images} frames...")
-    with mp.Pool(mp.cpu_count()) as pool:
-        rois = list(tqdm(
-            pool.imap(worker_func, scan.image_path_list, chunksize=50), 
-            total=scan.nb_images
-        ))
+    # Blocks in grid order: rows follow the slow motor, columns the fast one.
+    blocks = to_scan_grid(rois, scan.index_grid)
+    grid_shape = scan.scan_shape
+    if x_motor == scan.slow_motor_name:
+        # Put y along the rows so the mosaic is drawn with x horizontal.
+        n_slow, n_fast = grid_shape
+        blocks = [blocks[i * n_fast + j] for j in range(n_fast) for i in range(n_slow)]
+        grid_shape = (n_fast, n_slow)
+        x_grid, y_grid, mon_grid = x_grid.T, y_grid.T, mon_grid.T
 
     print("Computing metrics and stitching mosaic...")
-    pipeline_data = compute_pipeline_data(rois, scan.scan_shape)
+    pipeline_data = compute_pipeline_data(blocks, grid_shape)
     
     print("Saving HDF5 archive...")
     h5_path = args.output_dir / f"computed_metrics_scan{args.scan:04d}.h5"
