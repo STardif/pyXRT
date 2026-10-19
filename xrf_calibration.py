@@ -22,15 +22,21 @@ How it works
    element sits at its tabulated energy, with tabulated relative intensities,
    so unresolved multiplets (K-alpha1/2, L-beta1-4, ...) are placed correctly
    instead of being treated as single peaks.  The detector resolution is
-   fitted at the same time.
+   fitted at the same time, and optionally the sample-detector air path
+   (``fit_air_path=True``), from the intensity ratios *within* each element
+   (K-alpha/K-beta, L-alpha/L-beta/L-gamma).  Those ratios do not depend on
+   the loadings; the L ratios depend somewhat on the excitation spectrum,
+   which is the main systematic error of the fitted path.
 3. **Line checks.**  The strongest peaks are refitted one at a time in a
    narrow window, with only an energy shift free.  The shifts should scatter
    around zero within their errors; a trend with energy reveals a
    non-linear response that a gain and offset cannot describe.
-4. **Intensity check** (optional diagnostic).  For a calibrant with certified
-   loadings, the fitted areas are converted into atom ratios with
-   :func:`xrf_fit.number_ratio` and compared with the certificate.  This
-   tests the excitation and detection-efficiency models, not the calibration.
+4. **Intensity check.**  For a thin-film calibrant with certified loadings,
+   the reference-line area of each element should be ``A = k * loading * S``,
+   with ``S`` the group's ``ref_strength`` (excitation x cross-section x
+   detection efficiency, at the fitted air path) and ``k`` one overall scale.
+   Comparing the two tests the excitation and efficiency models; it does not
+   affect the calibration.
 
 Calibrants
 ----------
@@ -53,8 +59,11 @@ import numpy as np
 import xraylib
 from scipy.ndimage import gaussian_filter1d
 
+from scipy.optimize import curve_fit
+
+from xrf_beamline import AIR_FORMULA, air_density
 from xrf_fit import (Calibration, Detector, FitResult, LineGroup, element_line_groups,
-                     fit_average_spectrum, number_ratio, plot_fit, snip_background)
+                     fit_average_spectrum, plot_fit, snip_background)
 
 logger = logging.getLogger(__name__)
 
@@ -148,11 +157,16 @@ class CalibrationResult:
     fit : FitResult
         The global fit (``plot_fit(result.fit)`` shows it).
     detector : Detector
-        The input detector with the fitted resolution (noise, Fano, gamma).
+        The input detector with the fitted resolution (noise, Fano, gamma)
+        and, if fitted, air path.
     checks : list of LineCheck
         Individual peak positions (empty if not requested).
-    intensities : list of dict
-        Measured vs certified atom ratios (empty without certified loadings).
+    intensity : dict
+        Measured vs predicted areas of the certified elements: ``rows``,
+        ``scale``, ``chi2_red``, ``air_path_cm``.  Empty without enough
+        certified elements in the spectrum.
+    air_path_err : float
+        1-sigma statistical error of the fitted air path (NaN if not fitted).
     """
 
     calibration: Calibration
@@ -162,7 +176,8 @@ class CalibrationResult:
     detector: Detector
     calibrant: Calibrant
     checks: List[LineCheck] = field(default_factory=list)
-    intensities: List[dict] = field(default_factory=list)
+    intensity: dict = field(default_factory=dict)
+    air_path_err: float = float("nan")
 
     @property
     def gain_err(self) -> float:
@@ -200,6 +215,9 @@ class CalibrationResult:
             f"global fit: reduced chi2 = {self.fit.chi2_red:.2f}",
             f"resolution: FWHM {d.fwhm_ev(5900):.0f} eV at 5.9 keV, {d.fwhm_ev(10000):.0f} eV at 10 keV "
             f"(noise {d.noise_ev:.1f} eV, Fano {d.fano:.3f}, gamma {d.gamma_ev:.1f} eV)",
+            (f"sample-detector air path: {d.air_path_cm:.2f} +/- {self.air_path_err:.2f} cm (fitted, "
+             f"statistical error only)" if np.isfinite(self.air_path_err)
+             else f"sample-detector air path: {d.air_path_cm:.2f} cm (fixed)"),
         ]
         if self.checks:
             lines.append(f"line checks (calibrated energy of the peak - tabulated energy), "
@@ -207,16 +225,14 @@ class CalibrationResult:
             for k in sorted(self.checks, key=lambda k: k.energy_ev):
                 lines.append(f"  {k.label:<16} {k.energy_ev / 1000:7.3f} keV  ch {k.channel:7.1f}  "
                              f"{k.shift_ev:+6.1f} +/- {k.shift_err_ev:4.1f} eV")
-        if self.intensities:
-            ref = self.intensities[0]["reference"]
-            lines.append(f"intensity check, atom ratio to {ref} (tests the excitation/efficiency model):")
-            for r in self.intensities:
-                if not r["determined"]:
-                    lines.append(f"  {r['label']:<6} not determined (signal below 3 sigma)    "
-                                 f"certified {r['certified']:8.4g}")
-                    continue
-                lines.append(f"  {r['label']:<6} measured {r['measured']:8.4g} +/- {r['error']:<8.2g} "
-                             f"certified {r['certified']:8.4g}   ratio {r['measured'] / r['certified']:5.2f}")
+        if self.intensity:
+            it = self.intensity
+            lines.append(f"intensity check, area = k x loading x S(E) at {it['air_path_cm']:.1f} cm of air "
+                         f"(tests the excitation/efficiency model), chi2 = {it['chi2_red']:.1f}:")
+            for r in it["rows"]:
+                note = "" if r["used"] else "   (below 3 sigma, not used)"
+                lines.append(f"  {r['label']:<6} {r['energy_ev'] / 1000:6.2f} keV  measured / predicted "
+                             f"{r['ratio']:5.2f} +/- {r['ratio_err']:.2f}{note}")
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
@@ -229,9 +245,10 @@ class CalibrationResult:
             "covariance_gain_offset": self.covariance.tolist(),
             "chi2_red": self.fit.chi2_red,
             "detector": {"noise_ev": d.noise_ev, "fano": d.fano, "gamma_ev": d.gamma_ev,
-                         "fwhm_ev_at_5900": float(d.fwhm_ev(5900))},
+                         "fwhm_ev_at_5900": float(d.fwhm_ev(5900)), "air_path_cm": d.air_path_cm,
+                         "air_path_err": self.air_path_err},
             "line_checks": [dataclasses.asdict(k) for k in self.checks],
-            "intensities": self.intensities,
+            "intensity": self.intensity,
         }
 
 
@@ -286,15 +303,19 @@ def coarse_calibration(
 
 
 def _line_checks(y: np.ndarray, yerr: Optional[np.ndarray], fit: FitResult,
-                 detector: Detector, escape: bool, min_fraction: float = 0.05,
-                 half_width_fwhm: float = 1.5) -> List[LineCheck]:
+                 detector: Detector, escape: bool,
+                 refit_groups: Optional[Sequence[LineGroup]] = None,
+                 min_fraction: float = 0.05, half_width_fwhm: float = 1.5) -> List[LineCheck]:
     """Refit the strongest peaks one at a time with only an energy shift free.
 
     Each window keeps the groups that contribute at least 2 % of the modelled
     peak signal there (from the global fit); weaker ones would only add
-    amplitudes the window cannot constrain.
+    amplitudes the window cannot constrain.  ``refit_groups`` (matched by
+    label) replace the global fit's groups in the refits, e.g. groups rebuilt
+    at a fitted air path.
     """
     cal, groups, n = fit.calibration, fit.model.groups, len(y)
+    replace = {g.label: g for g in (refit_groups or [])}
     profiles = [fit.model.group_profile(i, fit.popt) for i in range(len(groups))]
     first = int(fit.channels[0])
     # candidate peaks: fitted area of each line, strongest first
@@ -317,7 +338,7 @@ def _line_checks(y: np.ndarray, yerr: Optional[np.ndarray], fit: FitResult,
             continue
         a, b = max(roi[0] - first, 0), max(roi[1] - first, 0)
         peak = [prof[a:b].max() if b > a else 0.0 for prof in profiles]
-        local = [gg for gg, h in zip(groups, peak) if h >= 0.02 * max(peak)]
+        local = [replace.get(gg.label, gg) for gg, h in zip(groups, peak) if h >= 0.02 * max(peak)]
         try:
             r = fit_average_spectrum(y, local, cal, detector, roi, yerr=yerr, background_order=1,
                                      fit_resolution=False, fit_gamma=False, escape=escape,
@@ -335,30 +356,43 @@ def _line_checks(y: np.ndarray, yerr: Optional[np.ndarray], fit: FitResult,
     return checks
 
 
-def _intensity_check(fit: FitResult, calibrant: Calibrant) -> List[dict]:
-    """Measured vs certified atom ratios, one family per element (the most
-    precise), relative to the most precisely measured certified element."""
+def _intensity_model(fit: FitResult, calibrant: Calibrant, detector: Detector,
+                     air_path_cm: float) -> dict:
+    """Compare the reference-line areas of the certified elements with
+    ``A = k * loading * S(E_ref)``, one family per element (the most precise).
+
+    ``S`` is the group's ``ref_strength``, computed with
+    ``detector.air_path_cm = d0``; at the air path ``air_path_cm = d`` it
+    scales as ``exp(-mu_air(E_ref) (d - d0))``.  Only ``k`` is fitted, on the
+    elements measured above 3 sigma.
+    """
     best: Dict[str, LineGroup] = {}
+    snr = {g.label: fit.areas[g.label] / max(fit.area_errors[g.label], 1e-300) for g in fit.model.groups}
     for g in fit.model.groups:
-        if g.element not in calibrant.loadings_ng_mm2 or not np.isfinite(g.ref_strength):
-            continue
-        snr = fit.areas[g.label] / max(fit.area_errors[g.label], 1e-300)
-        if g.element not in best or snr > fit.areas[best[g.element].label] / fit.area_errors[best[g.element].label]:
-            best[g.element] = g
-    if len(best) < 2:
-        return []
-    ref = max(best.values(), key=lambda g: fit.areas[g.label] / fit.area_errors[g.label])
-    rows = []
-    for el in calibrant.elements:
-        if el not in best:
-            continue
-        g = best[el]
-        ratio, err, _ = number_ratio(fit.areas[g.label], fit.areas[ref.label], g, ref,
-                                     fit.area_errors[g.label], fit.area_errors[ref.label])
-        rows.append({"label": g.label, "reference": ref.label, "measured": float(ratio),
-                     "error": float(err), "certified": calibrant.atom_ratio(el, ref.element),
-                     "determined": bool(ratio > 3 * err)})
-    return rows
+        if g.element in calibrant.loadings_ng_mm2 and np.isfinite(g.ref_strength) and g.ref_strength > 0:
+            if g.element not in best or snr[g.label] > snr[best[g.element].label]:
+                best[g.element] = g
+    groups = [best[el] for el in calibrant.elements if el in best]
+    area = np.array([fit.areas[g.label] for g in groups])
+    err = np.array([fit.area_errors[g.label] for g in groups])
+    used = area > 3 * err
+    if used.sum() < 2:
+        return {}
+
+    rho = air_density(detector.air_temperature_c, detector.air_pressure_hpa)
+    mu = np.array([xraylib.CS_Total_CP(AIR_FORMULA, g.reference.energy_ev / 1000.0) * rho for g in groups])
+    m = np.array([calibrant.loadings_ng_mm2[g.element] * g.ref_strength for g in groups])
+    m *= np.exp(-mu * (air_path_cm - detector.air_path_cm))
+    w = 1.0 / err[used] ** 2
+    k = float(np.sum(w * area[used] * m[used]) / np.sum(w * m[used] ** 2))
+    pred = k * m
+    chi2 = float(np.sum(((area[used] - pred[used]) / err[used]) ** 2) / max(int(used.sum()) - 1, 1))
+    return {"air_path_cm": float(air_path_cm), "scale": k, "chi2_red": chi2, "rows": [
+        {"label": g.label, "energy_ev": g.reference.energy_ev,
+         "loading_ng_mm2": calibrant.loadings_ng_mm2[g.element],
+         "area": float(a), "area_err": float(e), "predicted": float(pr),
+         "ratio": float(a / pr), "ratio_err": float(e / pr), "used": bool(u)}
+        for g, a, e, pr, u in zip(groups, area, err, pred, used)]}
 
 
 def calibrate(
@@ -378,6 +412,7 @@ def calibrate(
     min_rel: float = 0.01,
     coarse: bool = True,
     check_lines: bool = True,
+    fit_air_path: bool = False,
     **coarse_kw,
 ) -> CalibrationResult:
     """Calibrate the channel -> energy relation on a reference spectrum.
@@ -410,6 +445,8 @@ def calibrate(
     min_rel : drop lines weaker than this fraction of their group's reference
     coarse : run the coarse match first (else start from ``gain``, ``offset``)
     check_lines : measure the strongest peaks individually
+    fit_air_path : fit the sample-detector air path (from the line ratios
+        within each element), starting from ``detector.air_path_cm``
     **coarse_kw : passed to :func:`coarse_calibration` (search ranges)
     """
     y = np.asarray(y, dtype=float).reshape(-1)
@@ -426,18 +463,25 @@ def calibrate(
     roi = start.channel_range(*roi_ev, y.size)
     fit = fit_average_spectrum(y, groups, start, detector, roi, yerr=yerr,
                                background_order=background_order, escape=escape,
-                               fit_calibration=True)
+                               fit_calibration=True, fit_air_path=fit_air_path)
     p = fit.params()
     i = fit.model.param_names.index("cal_gain")
     covariance = np.array(fit.pcov[i:i + 2, i:i + 2], dtype=float)
+    air_path = fit.model.air_path_of(fit.popt)
     fitted_detector = dataclasses.replace(detector, noise_ev=p["noise_ev"][0], fano=p["fano"][0],
-                                          gamma_ev=p["gamma_ev"][0])
+                                          gamma_ev=p["gamma_ev"][0], air_path_cm=air_path)
 
     result = CalibrationResult(calibration=fit.calibration, covariance=covariance, start=start,
-                               fit=fit, detector=fitted_detector, calibrant=calibrant)
+                               fit=fit, detector=fitted_detector, calibrant=calibrant,
+                               intensity=_intensity_model(fit, calibrant, detector, air_path),
+                               air_path_err=p["air_path_cm"][1] if fit_air_path else float("nan"))
     if check_lines:
-        result.checks = _line_checks(y, yerr, fit, fitted_detector, escape)
-    result.intensities = _intensity_check(fit, calibrant)
+        # local refits use the fitted response, with the air path fixed: rebuild
+        # the groups at that path so their relative intensities include it
+        local_groups = (element_line_groups(elements, *roi_ev, e0_eff_kev=e0_eff_kev, families=families,
+                                            min_rel=min_rel, incident_spectrum=incident_spectrum,
+                                            detector=fitted_detector) if fit_air_path else groups)
+        result.checks = _line_checks(y, yerr, fit, fitted_detector, escape, refit_groups=local_groups)
     return result
 
 

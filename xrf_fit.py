@@ -944,6 +944,7 @@ class XRFModel:
     ``gamma_ev``          global Lorentzian HWHM        (if fitted)
     ``cal_gain``          eV per channel                (if fitted)
     ``cal_offset_ev``     energy of channel 0           (if fitted)
+    ``air_path_cm``       sample-detector air path      (if fitted)
     ``pileup_tau_us``     pulse-pair resolving time     (if fitted)
     ====================  =========================================
 
@@ -987,6 +988,14 @@ class XRFModel:
         line energies), ``"offset"`` only shifts the energy scale (used for
         local position checks).  ``calibration`` is then the starting point;
         :meth:`calibration_of` gives the fitted one.
+    fit_air_path : bool
+        Free the sample-detector air path.  The groups' relative intensities
+        were computed with ``detector.air_path_cm`` (= d0); for a path ``d``
+        each line is rescaled by ``exp(-(mu_l - mu_ref) (d - d0))``, with
+        ``mu`` the air attenuation at the line and at the group's reference
+        line.  The information comes from intensity ratios *within* groups
+        (K-alpha/K-beta, L-alpha/L-beta/L-gamma), which do not depend on the
+        sample composition.  The reference-line amplitudes absorb the rest.
     """
 
     def __init__(self, groups: Sequence[LineGroup], calibration: Calibration,
@@ -996,12 +1005,13 @@ class XRFModel:
                  escape: bool = False,
                  pileup_template: Optional[np.ndarray] = None,
                  fit_pileup: bool = True, pileup_tau_us: float = 0.2,
-                 fit_calibration: bool | str = False):
+                 fit_calibration: bool | str = False, fit_air_path: bool = False):
         if not groups:
             raise ValueError("At least one line group is required.")
         if fit_calibration not in (False, True, "offset"):
             raise ValueError(f"fit_calibration must be False, True or 'offset', got {fit_calibration!r}")
         self.fit_calibration = fit_calibration
+        self.fit_air_path = bool(fit_air_path)
         self.groups = list(groups)
         self.calibration = calibration
         self.detector = detector
@@ -1016,6 +1026,13 @@ class XRFModel:
         self.fixed_pileup_tau_us = float(pileup_tau_us)
         # escape companions per line, computed once
         self._escapes = {(gi, li): (detector.escape_lines(l.energy_ev) if self.escape else [])
+                         for gi, g in enumerate(self.groups) for li, l in enumerate(g.lines)}
+        # air attenuation (1/cm) of each line relative to its group's reference line
+        self._dmu = {}
+        if self.fit_air_path:
+            rho = air_density(detector.air_temperature_c, detector.air_pressure_hpa)
+            mu = lambda e_ev: xraylib.CS_Total_CP(AIR_FORMULA, e_ev / 1000.0) * rho
+            self._dmu = {(gi, li): mu(l.energy_ev) - mu(g.reference.energy_ev)
                          for gi, g in enumerate(self.groups) for li, l in enumerate(g.lines)}
 
         self.energies = calibration.energy(self.channels)
@@ -1036,9 +1053,12 @@ class XRFModel:
             names += ["cal_gain", "cal_offset_ev"]
         elif self.fit_calibration == "offset":
             names += ["cal_offset_ev"]
+        if self.fit_air_path:
+            names += ["air_path_cm"]
         if self.fit_pileup:
             names += ["pileup_tau_us"]
         self.param_names: List[str] = names
+        self._index = {n: i for i, n in enumerate(names)}
 
     # -- parameter unpacking ------------------------------------------------
 
@@ -1061,10 +1081,16 @@ class XRFModel:
         ``fit_calibration`` is set, otherwise the fixed input."""
         if not self.fit_calibration:
             return self.calibration
-        i = self.n_bkg + len(self.groups) + 2 * self.fit_resolution + self.fit_gamma
+        offset = float(params[self._index["cal_offset_ev"]])
         if self.fit_calibration is True:
-            return Calibration(gain=float(params[i]), offset=float(params[i + 1]))
-        return Calibration(gain=self.calibration.gain, offset=float(params[i]))
+            return Calibration(gain=float(params[self._index["cal_gain"]]), offset=offset)
+        return Calibration(gain=self.calibration.gain, offset=offset)
+
+    def air_path_of(self, params: Sequence[float]) -> float:
+        """Sample-detector air path (cm): fitted, or ``detector.air_path_cm``."""
+        if not self.fit_air_path:
+            return self.detector.air_path_cm
+        return float(params[self._index["air_path_cm"]])
 
     def pileup_tau_us(self, params: Sequence[float]) -> float:
         """Pulse-pair resolving time (µs): fitted, fixed, or 0 without pile-up."""
@@ -1101,19 +1127,21 @@ class XRFModel:
         cal = self.calibration_of(params)
         gain = cal.gain
         gamma_ch = gamma / gain
+        d_air = self.air_path_of(params) - self.detector.air_path_cm
         out = np.zeros_like(self.channels)
         for li, line in enumerate(g.lines):
             escapes = self._escapes[(index, li)]
             parent = 1.0 - sum(f for _, f in escapes)
+            rel = line.rel * np.exp(-self._dmu[(index, li)] * d_air) if self.fit_air_path else line.rel
             sigma_ch = sigma_scale * self.detector.sigma_ev(line.energy_ev, noise_ev=noise, fano=fano) / gain
             centre_ch = cal.channel(line.energy_ev)
-            out += (amps[index] * line.rel * parent) * voigt_profile(
+            out += (amps[index] * rel * parent) * voigt_profile(
                 self.channels - centre_ch, sigma_ch, gamma_ch)
             for e_esc, f in escapes:
                 # the charge cloud corresponds to the deposited energy, so the
                 # escape peak has the resolution of E - E_X
                 s_esc = sigma_scale * self.detector.sigma_ev(e_esc, noise_ev=noise, fano=fano) / gain
-                out += (amps[index] * line.rel * f) * voigt_profile(
+                out += (amps[index] * rel * f) * voigt_profile(
                     self.channels - cal.channel(e_esc), s_esc, gamma_ch)
         return out
 
@@ -1178,6 +1206,10 @@ class XRFModel:
             p0 += [o0]                     # +/- 50 channels around the start
             lo += [o0 - 50.0 * g0]
             hi += [o0 + 50.0 * g0]
+        if self.fit_air_path:
+            p0 += [self.detector.air_path_cm]
+            lo += [0.0]
+            hi += [200.0]
         if self.fit_pileup:
             p0 += [self.fixed_pileup_tau_us]   # µs; pulse-pair resolution is typically 0.1-1 µs
             lo += [0.0]
@@ -1255,12 +1287,13 @@ def fit_average_spectrum(
     fit_pileup: bool = True,
     pileup_tau_us: float = 0.2,
     fit_calibration: bool | str = False,
+    fit_air_path: bool = False,
 ) -> FitResult:
     """Fit the constrained Voigt model to a single spectrum.
 
-    ``escape``, ``pileup_template``, ``fit_pileup``, ``pileup_tau_us`` and
-    ``fit_calibration`` are passed to :class:`XRFModel`; with a fitted
-    calibration, ``FitResult.calibration`` holds the result.
+    ``escape``, ``pileup_template``, ``fit_pileup``, ``pileup_tau_us``,
+    ``fit_calibration`` and ``fit_air_path`` are passed to :class:`XRFModel`;
+    with a fitted calibration, ``FitResult.calibration`` holds the result.
 
     Parameters
     ----------
@@ -1302,7 +1335,7 @@ def fit_average_spectrum(
                      fit_resolution=fit_resolution, fit_gamma=fit_gamma,
                      escape=escape, pileup_template=pileup_template,
                      fit_pileup=fit_pileup, pileup_tau_us=pileup_tau_us,
-                     fit_calibration=fit_calibration)
+                     fit_calibration=fit_calibration, fit_air_path=fit_air_path)
     p0, bounds = model.initial_guess(yy)
 
     popt, pcov = curve_fit(model, ch, yy, p0=p0, bounds=bounds,
