@@ -376,6 +376,41 @@ class Slit:
 OpticalElement = Union[Mirror, Filter, Slit]
 
 
+def tube_lines(anode: str, lines: Sequence[str] = ("KL3", "KL2")) -> Tuple[np.ndarray, np.ndarray]:
+    """Energies (eV) and relative intensities of X-ray tube anode lines.
+
+    The default is the K-alpha1/K-alpha2 doublet that a crystal or multilayer
+    monochromator passes from a tube (e.g. ``tube_lines("Mo")``: 17479 and
+    17374 eV).  Intensities are the radiative rates (they share the K vacancy).
+    """
+    z = xraylib.SymbolToAtomicNumber(anode)
+    e = np.array([xraylib.LineEnergy(z, getattr(xraylib, f"{n}_LINE")) * 1000.0 for n in lines])
+    w = np.array([xraylib.RadRate(z, getattr(xraylib, f"{n}_LINE")) for n in lines])
+    return e, w / w.sum()
+
+
+def monochromatic_spectrum(energies_ev: Sequence[float], weights: Sequence[float] = (1.0,),
+                           width_ev: float = 5.0, step_ev: float = 1.0
+                           ) -> Tuple[np.ndarray, np.ndarray]:
+    """A narrow incident spectrum ``(energy_kev, flux per 0.1 % BW)`` made of
+    Gaussian lines, for the functions that take an incident spectrum
+    (:func:`xrf_fit.element_line_groups`, :class:`xrf_matrix.MatrixModel`).
+
+    ``width_ev`` is the Gaussian sigma of each line; it only needs to be
+    resolved by the grid (``step_ev``), its value does not matter for
+    cross-sections that vary slowly across it.  With ``MatrixModel``, pass
+    ``sf_step_kev=step_ev / 1000`` (its secondary-fluorescence grid is
+    decimated to 40 eV by default, which would miss a narrow line).
+    """
+    e = np.asarray(energies_ev, dtype=float)
+    w = np.broadcast_to(np.asarray(weights, dtype=float), e.shape)
+    grid = np.arange(e.min() - 8 * width_ev, e.max() + 8 * width_ev + step_ev / 2, step_ev)
+    density = sum(wi * np.exp(-0.5 * ((grid - ei) / width_ev) ** 2) for ei, wi in zip(e, w))
+    density = density / (np.sqrt(2 * np.pi) * width_ev)          # photons per eV
+    # per 0.1 % bandwidth = per (1e-3 E): the convention of Beamline.spectrum
+    return grid / 1000.0, density * 1e-3 * grid
+
+
 def per_unit_energy(energies_kev: np.ndarray, flux_01bw: np.ndarray) -> np.ndarray:
     """Convert a per-0.1 %-bandwidth flux into a per-keV spectral density.
 
