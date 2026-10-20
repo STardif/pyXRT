@@ -165,3 +165,7 @@ pip-log.txt
 # Local XRF datasets and generated image outputs
 /*.h5
 /processed/*.png
+
+# Local XRF test spectrum (PyMca training data)
+XRFSpectrum.mca
+/processed/XRFSpectrum_fit.json
