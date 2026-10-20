@@ -57,6 +57,10 @@ Matrix effects (self-absorption and secondary fluorescence in a layer or bulk
 sample) come from :mod:`xrf_matrix`: pass a ``MatrixModel`` to
 :func:`element_line_groups`.
 
+With monochromatic excitation, :class:`ScatterSource` adds the elastic peak and
+the Compton peak (impulse approximation with the scatterer's Compton profile,
+averaged over the range of scattering angles the detector collects).
+
 Sensor escape peaks (``escape=True``) and pile-up sum peaks
 (``pileup_template``, from :func:`pileup_spectra`) are optional parts of
 :class:`XRFModel`; the escape peaks add no free parameter, pile-up adds one
@@ -64,7 +68,9 @@ Sensor escape peaks (``escape=True``) and pile-up sum peaks
 
 What this module does *not* do yet
 ----------------------------------
-* No low-energy tail / shelf in the detector response (Hypermet).
+* The detector response is a Voigt by default; a low-energy tail and a step
+  (Hypermet-type, :func:`peak_shape`) are optional (``Detector.tail_*`` /
+  ``fit_tails``).
 * No Laue (Bragg) peaks from the sample in the fluorescence spectrum.
 * The energy calibration is an input of map fits.  It can be fitted on a
   reference spectrum (``fit_calibration`` in :func:`fit_average_spectrum`);
@@ -85,7 +91,8 @@ import numpy as np
 import xraylib
 from scipy.integrate import trapezoid
 from scipy.optimize import curve_fit
-from scipy.special import voigt_profile
+from scipy.special import erfc, erfcx, voigt_profile
+from scipy.signal import fftconvolve
 
 from xrf_beamline import AIR_FORMULA, air_density, per_unit_energy
 from xrf_matrix import MatrixModel
@@ -125,6 +132,8 @@ __all__ = [
     "pixel_parameters",
     "select_pixels",
     "plot_pixel_fits",
+    "ScatterSource",
+    "peak_shape",
 ]
 
 
@@ -223,6 +232,18 @@ class Detector:
         the ESRF, changes the 20 cm optical depth at 3.3 keV by ~8 %).
     dead_layer_um : float
         Inactive Si at the entrance; unknown for this unit, default 0.
+
+    Line shape (see :func:`peak_shape`)
+    -----------------------------------
+    Incomplete charge collection adds a low-energy tail and a flat step to
+    every peak.  Zero (the default) gives a pure Voigt.
+
+    tail_fraction : float
+        Fraction of each line's area in the exponential low-energy tail.
+    tail_slope : float
+        Decay length of the tail, in units of the line's Gaussian sigma.
+    step_fraction : float
+        Height of the step below each line, as a fraction of the peak height.
     """
 
     material: str = "Si"
@@ -237,6 +258,9 @@ class Detector:
     air_temperature_c: float = 20.0
     air_pressure_hpa: float = 1013.25
     dead_layer_um: float = 0.0
+    tail_fraction: float = 0.0
+    tail_slope: float = 1.5
+    step_fraction: float = 0.0
 
     @property
     def pair_energy_ev(self) -> float:
@@ -964,6 +988,112 @@ def snip_background(y: np.ndarray, width: int = 40, iterations: int = 24,
 # The model
 # =============================================================================
 
+def peak_shape(x: np.ndarray, sigma: float, gamma: float = 0.0, tail_fraction: float = 0.0,
+               tail_slope: float = 1.5, step_fraction: float = 0.0) -> np.ndarray:
+    """Unit-area detector response to one line (plus its step), Hypermet-type.
+
+    ``(1 - t) * Voigt(x; sigma, gamma) + t * T(x) + s * h * erfc(x / (sqrt(2) sigma)) / 2``
+
+    with ``T`` an exponential low-energy tail of decay length
+    ``beta = tail_slope * sigma`` convolved with the Gaussian (unit area),
+    ``h = 1 / (sqrt(2 pi) sigma)`` the Gaussian peak height, ``t`` the
+    tail fraction and ``s`` the step height relative to the peak.  ``x`` is
+    the distance to the line centre in any unit, the same as ``sigma``.
+    """
+    x = np.asarray(x, dtype=float)
+    out = (1.0 - tail_fraction) * voigt_profile(x, sigma, gamma) if gamma > 0 else \
+        (1.0 - tail_fraction) * np.exp(-0.5 * (x / sigma) ** 2) / (np.sqrt(2.0 * np.pi) * sigma)
+    if tail_fraction > 0:
+        beta = tail_slope * sigma
+        z = (x / sigma + sigma / beta) / np.sqrt(2.0)
+        # exp(x/beta + sigma^2/2beta^2) erfc(z), written to avoid overflow on both sides
+        tail = np.where(z > 0, np.exp(-0.5 * (x / sigma) ** 2) * erfcx(np.maximum(z, 0.0)),
+                        np.exp(np.minimum(x / beta + 0.5 * (sigma / beta) ** 2, 50.0))
+                        * erfc(np.minimum(z, 0.0)))
+        out = out + tail_fraction * tail / (2.0 * beta)
+    if step_fraction > 0:
+        out = out + step_fraction * erfc(x / (np.sqrt(2.0) * sigma)) / (2.0 * np.sqrt(2.0 * np.pi) * sigma)
+    return out
+
+
+def _angle_grid(angle_deg: float, spread_deg: float, n: int = 15) -> np.ndarray:
+    """Scattering angles sampled uniformly over ``angle +/- spread`` (one angle
+    without spread), kept inside (1, 179) degrees."""
+    if spread_deg <= 0.05:
+        return np.array([angle_deg])
+    return np.clip(angle_deg + spread_deg * np.linspace(-1.0, 1.0, n), 1.0, 179.0)
+
+
+@dataclass
+class ScatterSource:
+    """Monochromatic excitation, for the elastic and Compton scatter peaks.
+
+    Parameters
+    ----------
+    energies_ev : sequence of float
+        Excitation line energies (e.g. Mo K-alpha1 and K-alpha2 of a
+        monochromatised tube).
+    weights : sequence of float
+        Relative intensities of those lines (normalised internally).
+    angle_deg : float
+        Scattering angle (between the incident beam and the direction to the
+        detector), the starting value of the fitted Compton angle.
+    scatterer : str, optional
+        Chemical formula of the scattering medium (e.g. ``"H2O"``).  The
+        Compton peak then has the impulse-approximation shape, from the
+        tabulated Compton profiles ``J(p_z)`` of its atoms (xraylib): a sharp
+        core from the outer electrons and broad wings from the inner shells.
+        Without it, the Compton peak is a Gaussian.
+
+    Start the fit from a calibration within a few channels of the truth at
+    the scatter peaks (e.g. :func:`xrf_calibration.calibration_from_peaks`
+    on a fluorescence line and the elastic peak): from a start ~20 channels
+    off, the optimiser can stop in a poorer minimum where the Compton
+    angle spread, its extra width and the detector tails trade off.
+    """
+
+    energies_ev: Sequence[float]
+    weights: Sequence[float] = (1.0,)
+    angle_deg: float = 90.0
+    scatterer: Optional[str] = None
+
+    def __post_init__(self):
+        e = np.atleast_1d(np.asarray(self.energies_ev, dtype=float))
+        w = np.atleast_1d(np.asarray(self.weights, dtype=float))
+        if w.size == 1 and e.size > 1:
+            w = np.full(e.size, w[0])
+        if w.size != e.size:
+            raise ValueError("energies_ev and weights must have the same length.")
+        self.energies_ev = tuple(e)
+        self.weights = tuple(w / w.sum())
+
+    @staticmethod
+    def compton_energy_ev(e_ev: float | np.ndarray, angle_deg: float) -> float | np.ndarray:
+        """Compton-scattered photon energy (free electron at rest)."""
+        return e_ev / (1.0 + e_ev / 510998.95 * (1.0 - np.cos(np.radians(angle_deg))))
+
+    def profile_table(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """``(p_z, J)`` of the scatterer, ``p_z >= 0`` in atomic units, ``J``
+        summed over the atoms of one formula unit; None without a scatterer."""
+        if not self.scatterer:
+            return None
+        comp = xraylib.CompoundParser(self.scatterer)
+        pz = np.linspace(0.0, 60.0, 3001)
+        j = sum(n * np.array([xraylib.ComptonProfile(z, float(q)) for q in pz])
+                for z, n in zip(comp["Elements"], comp["nAtoms"]))
+        return pz, j
+
+    @staticmethod
+    def compton_pz(e_ev: np.ndarray, e0_ev: float, angle_deg: float) -> np.ndarray:
+        """Electron momentum component ``p_z`` (atomic units) that scatters a
+        photon of ``e0_ev`` into ``e_ev`` at ``angle_deg`` (impulse approximation)."""
+        m = 510998.95
+        c = np.cos(np.radians(angle_deg))
+        e = np.asarray(e_ev, dtype=float)
+        q = np.sqrt(np.maximum(e0_ev ** 2 + e ** 2 - 2.0 * e0_ev * e * c, 1e-12))
+        return 137.036 * (e0_ev * e * (1.0 - c) / m - (e0_ev - e)) / q
+
+
 class XRFModel:
     """Constrained Voigt model of an XRF spectrum.
 
@@ -978,6 +1108,17 @@ class XRFModel:
     ``cal_gain``          eV per channel                (if fitted)
     ``cal_offset_ev``     energy of channel 0           (if fitted)
     ``air_path_cm``       sample-detector air path      (if fitted)
+    ``tail_fraction``,    detector tail and step        (if fit_tails)
+    ``tail_slope``,
+    ``step_fraction``
+    ``A_elastic``,        scatter peaks                 (with scatter)
+    ``elastic_sigma_ev``,
+    ``A_compton``,
+    ``compton_angle_deg``,
+    ``compton_angle_spread_deg``,
+    ``compton_sigma_ev``,
+    ``compton_tail_fraction``,
+    ``compton_tail_slope``
     ``pileup_tau_us``     pulse-pair resolving time     (if fitted)
     ====================  =========================================
 
@@ -993,6 +1134,11 @@ class XRFModel:
         the resolution parameters.
     channels : (n,) array
         The channel grid of the fit ROI.
+    background_kind : {"poly", "exp"}
+        ``"poly"`` (default): the background is the polynomial.  ``"exp"``: it
+        is ``exp(polynomial)``, positive by construction and closer to the shape
+        of a scatter continuum over a wide energy range (the fit is then not
+        linear in the background terms, so :func:`fit_map` needs ``"poly"``).
     background_order : int
         Polynomial order; 0 is a constant, 1 linear.  Use ``None`` for no
         background term (e.g. after SNIP stripping).
@@ -1029,6 +1175,21 @@ class XRFModel:
         line.  The information comes from intensity ratios *within* groups
         (K-alpha/K-beta, L-alpha/L-beta/L-gamma), which do not depend on the
         sample composition.  The reference-line amplitudes absorb the rest.
+    fit_tails : bool
+        Free the detector tail and step (:func:`peak_shape`), shared by all
+        lines; otherwise ``detector.tail_*`` / ``step_fraction`` are used.
+    scatter : ScatterSource, optional
+        Monochromatic excitation: adds the elastic peak (excitation lines with
+        the detector response, Gaussian-broadened by ``elastic_sigma_ev`` for
+        the bandwidth of the monochromator) and the Compton peak (at the energy of the fitted
+        scattering angle, averaged uniformly over the scattering angles
+        ``compton_angle_deg +/- compton_angle_spread_deg`` that the detector
+        collects (the Compton energy depends non-linearly on the angle, so a
+        close detector gives an asymmetric peak), Gaussian-broadened by
+        ``compton_sigma_ev``, with its own low-energy tail), both with escape
+        peaks when ``escape`` is set.  The elastic peak has the detector
+        response of the fluorescence lines.  Two free amplitudes and six
+        shape parameters.
     """
 
     def __init__(self, groups: Sequence[LineGroup], calibration: Calibration,
@@ -1038,18 +1199,26 @@ class XRFModel:
                  escape: bool = False,
                  pileup_template: Optional[np.ndarray] = None,
                  fit_pileup: bool = True, pileup_tau_us: float = 0.2,
-                 fit_calibration: bool | str = False, fit_air_path: bool = False):
-        if not groups:
+                 fit_calibration: bool | str = False, fit_air_path: bool = False,
+                 fit_tails: bool = False, scatter: Optional[ScatterSource] = None,
+                 background_kind: str = "poly"):
+        if not groups and scatter is None:
             raise ValueError("At least one line group is required.")
         if fit_calibration not in (False, True, "offset"):
             raise ValueError(f"fit_calibration must be False, True or 'offset', got {fit_calibration!r}")
         self.fit_calibration = fit_calibration
         self.fit_air_path = bool(fit_air_path)
+        self.fit_tails = bool(fit_tails)
+        self.scatter = scatter
+        self._jtable = scatter.profile_table() if scatter is not None else None
         self.groups = list(groups)
         self.calibration = calibration
         self.detector = detector
         self.channels = np.asarray(channels, dtype=float)
         self.background_order = background_order
+        if background_kind not in ("poly", "exp"):
+            raise ValueError(f"background_kind must be 'poly' or 'exp', got {background_kind!r}")
+        self.background_kind = background_kind
         self.fit_resolution = bool(fit_resolution)
         self.fit_gamma = bool(fit_gamma)
         self.escape = bool(escape)
@@ -1088,6 +1257,12 @@ class XRFModel:
             names += ["cal_offset_ev"]
         if self.fit_air_path:
             names += ["air_path_cm"]
+        if self.fit_tails:
+            names += ["tail_fraction", "tail_slope", "step_fraction"]
+        if self.scatter is not None:
+            names += ["A_elastic", "elastic_sigma_ev", "A_compton", "compton_angle_deg",
+                      "compton_angle_spread_deg", "compton_sigma_ev", "compton_tail_fraction",
+                      "compton_tail_slope"]
         if self.fit_pileup:
             names += ["pileup_tau_us"]
         self.param_names: List[str] = names
@@ -1143,7 +1318,105 @@ class XRFModel:
         bkg, *_ = self._unpack(params)
         if self.n_bkg == 0:
             return np.zeros_like(self.channels)
-        return sum(c * self._u ** k for k, c in enumerate(bkg))
+        poly = sum(c * self._u ** k for k, c in enumerate(bkg))
+        return np.exp(np.clip(poly, -50.0, 50.0)) if self.background_kind == "exp" else poly
+
+    def tails_of(self, params: Sequence[float]) -> Tuple[float, float, float]:
+        """(tail_fraction, tail_slope, step_fraction): fitted, or the detector's."""
+        if not self.fit_tails:
+            d = self.detector
+            return d.tail_fraction, d.tail_slope, d.step_fraction
+        return tuple(float(params[self._index[n]])
+                     for n in ("tail_fraction", "tail_slope", "step_fraction"))
+
+    def _shape(self, centre_ch: float, sigma_ch: float, gamma_ch: float, tails) -> np.ndarray:
+        return peak_shape(self.channels - centre_ch, sigma_ch, gamma_ch, *tails)
+
+    def scatter_profile(self, params: Sequence[float], which: str = "both") -> np.ndarray:
+        """Elastic and/or Compton contribution (``which`` = "elastic",
+        "compton" or "both"); zero without a scatter source."""
+        out = np.zeros_like(self.channels)
+        if self.scatter is None:
+            return out
+        _, _, noise, fano, gamma = self._unpack(params)
+        cal = self.calibration_of(params)
+        gain = cal.gain
+        gamma_ch = gamma / gain
+        tails = self.tails_of(params)
+        v = {n: float(params[self._index[n]]) for n in
+             ("A_elastic", "elastic_sigma_ev", "A_compton", "compton_angle_deg",
+              "compton_angle_spread_deg", "compton_sigma_ev", "compton_tail_fraction",
+              "compton_tail_slope")}
+        for e0, w in zip(self.scatter.energies_ev, self.scatter.weights):
+            if which in ("elastic", "both"):
+                peaks = [(e0, 1.0, 0.0)]
+                peaks += [(e, f, 0.0) for e, f in (self.detector.escape_lines(e0) if self.escape else [])]
+                parent = 1.0 - sum(f for _, f, _ in peaks[1:])
+                for k, (e, f, extra) in enumerate(peaks):
+                    s_ch = np.hypot(self.detector.sigma_ev(e, noise_ev=noise, fano=fano),
+                                    v["elastic_sigma_ev"]) / gain
+                    out += v["A_elastic"] * w * (parent if k == 0 else f) * self._shape(
+                        cal.channel(e), s_ch, gamma_ch, tails)
+            if which in ("compton", "both") and self._jtable is not None:
+                out += v["A_compton"] * w * self._compton_ia(cal, e0, v, noise, fano, tails)
+            elif which in ("compton", "both"):
+                angles = _angle_grid(v["compton_angle_deg"], v["compton_angle_spread_deg"])
+                for a in angles:
+                    ec = float(ScatterSource.compton_energy_ev(e0, a))
+                    peaks = [(ec, 1.0)]
+                    peaks += [(e, f) for e, f in (self.detector.escape_lines(ec) if self.escape else [])]
+                    parent = 1.0 - sum(f for _, f in peaks[1:])
+                    for k, (e, f) in enumerate(peaks):
+                        s_ch = np.hypot(self.detector.sigma_ev(e, noise_ev=noise, fano=fano),
+                                        v["compton_sigma_ev"]) / gain
+                        x = self.channels - cal.channel(e)
+                        out += (v["A_compton"] * w * (parent if k == 0 else f) / len(angles)
+                                * self._compton_kernel(x, s_ch, v, tails[2]))
+        return out
+
+    @staticmethod
+    def _compton_kernel(x: np.ndarray, sigma: float, v: dict, step: float) -> np.ndarray:
+        """Unit-area Compton response: Gaussian with a low-energy tail."""
+        return peak_shape(x, sigma, 0.0, v["compton_tail_fraction"], v["compton_tail_slope"], step)
+
+    def _compton_ia(self, cal: Calibration, e0: float, v: dict, noise: float, fano: float,
+                    tails) -> np.ndarray:
+        """Unit-area Compton peak of one excitation line, impulse approximation:
+        ``J(p_z(E)) |dp_z/dE|`` on the channel grid, convolved with the detector
+        response (Gaussian of the resolution at the Compton energy combined with
+        ``compton_sigma_ev``, low-energy tail), plus the step and escape peaks."""
+        pz_tab, j_tab = self._jtable
+        gain = cal.gain
+        # evaluate on a grid extending 3 keV below the ROI so that the wings are
+        # not cut, in channel steps
+        n_ext = int(3000.0 / gain)
+        ch = np.arange(self.channels[0] - n_ext, self.channels[-1] + 1.0)
+        e = cal.energy(ch)
+        angle = v["compton_angle_deg"]
+        prof = np.zeros_like(e)
+        for a in _angle_grid(angle, v["compton_angle_spread_deg"]):
+            pz = ScatterSource.compton_pz(e, e0, a)
+            prof += np.interp(np.abs(pz), pz_tab, j_tab, right=0.0) * np.abs(np.gradient(pz, e))
+        prof[e >= e0] = 0.0
+        total = prof.sum()
+        if total <= 0:
+            return np.zeros_like(self.channels)
+        prof /= total
+        ec = float(ScatterSource.compton_energy_ev(e0, angle))
+        sig = np.hypot(self.detector.sigma_ev(ec, noise_ev=noise, fano=fano), v["compton_sigma_ev"]) / gain
+        half = prof.size
+        k = np.arange(-half, half + 1, dtype=float)
+        kern = self._compton_kernel(k, sig, v, 0.0)
+        conv = fftconvolve(prof, kern, mode="full")[half:half + prof.size]
+        step = tails[2] / (np.sqrt(2.0 * np.pi) * sig) * (
+            np.cumsum(prof[::-1])[::-1] - prof)                 # counts above each channel
+        base = conv + step
+        resp = base.copy()
+        if self.escape:
+            for e_esc, f in self.detector.escape_lines(ec):
+                shift = (ec - e_esc) / gain        # escape peaks sit E_X lower
+                resp += f * (np.interp(ch + shift, ch, base, left=0.0, right=0.0) - base)
+        return resp[n_ext:]
 
     def group_profile(self, index: int, params: Sequence[float],
                       sigma_scale: float = 1.0) -> np.ndarray:
@@ -1161,6 +1434,7 @@ class XRFModel:
         gain = cal.gain
         gamma_ch = gamma / gain
         d_air = self.air_path_of(params) - self.detector.air_path_cm
+        tails = self.tails_of(params)
         out = np.zeros_like(self.channels)
         for li, line in enumerate(g.lines):
             escapes = self._escapes[(index, li)]
@@ -1168,19 +1442,17 @@ class XRFModel:
             rel = line.rel * np.exp(-self._dmu[(index, li)] * d_air) if self.fit_air_path else line.rel
             sigma_ch = sigma_scale * self.detector.sigma_ev(line.energy_ev, noise_ev=noise, fano=fano) / gain
             centre_ch = cal.channel(line.energy_ev)
-            out += (amps[index] * rel * parent) * voigt_profile(
-                self.channels - centre_ch, sigma_ch, gamma_ch)
+            out += (amps[index] * rel * parent) * self._shape(centre_ch, sigma_ch, gamma_ch, tails)
             for e_esc, f in escapes:
                 # the charge cloud corresponds to the deposited energy, so the
                 # escape peak has the resolution of E - E_X
                 s_esc = sigma_scale * self.detector.sigma_ev(e_esc, noise_ev=noise, fano=fano) / gain
-                out += (amps[index] * rel * f) * voigt_profile(
-                    self.channels - cal.channel(e_esc), s_esc, gamma_ch)
+                out += (amps[index] * rel * f) * self._shape(cal.channel(e_esc), s_esc, gamma_ch, tails)
         return out
 
     def __call__(self, channels: np.ndarray, *params: float) -> np.ndarray:
         """Total model, in the signature ``curve_fit`` expects."""
-        total = self.background(params) + self.pileup_profile(params)
+        total = self.background(params) + self.pileup_profile(params) + self.scatter_profile(params)
         for i in range(len(self.groups)):
             total = total + self.group_profile(i, params)
         return total
@@ -1202,7 +1474,8 @@ class XRFModel:
         hi: List[float] = []
 
         if self.n_bkg:
-            p0 += [base] + [0.0] * (self.n_bkg - 1)
+            c0 = np.log(max(base, 1e-6)) if self.background_kind == "exp" else base
+            p0 += [c0] + [0.0] * (self.n_bkg - 1)
             lo += [-np.inf] * self.n_bkg
             hi += [np.inf] * self.n_bkg
 
@@ -1243,6 +1516,22 @@ class XRFModel:
             p0 += [self.detector.air_path_cm]
             lo += [0.0]
             hi += [200.0]
+        if self.fit_tails:
+            d = self.detector
+            p0 += [max(d.tail_fraction, 0.05), d.tail_slope, max(d.step_fraction, 1e-3)]
+            lo += [0.0, 0.2, 0.0]
+            hi += [0.6, 20.0, 0.1]
+        if self.scatter is not None:
+            def area_at(e_ev, sigma_ev):
+                ch = self.calibration.channel(e_ev)
+                j = int(np.clip(np.searchsorted(self.channels, ch), 0, len(self.channels) - 1))
+                return max(float(y[j]) - base, 0.01 * span) * sigma_ev / self.calibration.gain * np.sqrt(2 * np.pi)
+            e_mean = float(np.dot(self.scatter.energies_ev, self.scatter.weights))
+            e_c = float(ScatterSource.compton_energy_ev(e_mean, self.scatter.angle_deg))
+            p0 += [area_at(e_mean, self.detector.sigma_ev(e_mean)), 20.0, area_at(e_c, 250.0),
+                   self.scatter.angle_deg, 20.0, 50.0, 0.1, 2.0]
+            lo += [0.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 0.2]
+            hi += [np.inf, 500.0, np.inf, 175.0, 80.0, 2000.0, 0.6, 20.0]
         if self.fit_pileup:
             p0 += [self.fixed_pileup_tau_us]   # µs; pulse-pair resolution is typically 0.1-1 µs
             lo += [0.0]
@@ -1321,11 +1610,15 @@ def fit_average_spectrum(
     pileup_tau_us: float = 0.2,
     fit_calibration: bool | str = False,
     fit_air_path: bool = False,
+    fit_tails: bool = False,
+    scatter: Optional[ScatterSource] = None,
+    background_kind: str = "poly",
 ) -> FitResult:
     """Fit the constrained Voigt model to a single spectrum.
 
     ``escape``, ``pileup_template``, ``fit_pileup``, ``pileup_tau_us``,
-    ``fit_calibration`` and ``fit_air_path`` are passed to :class:`XRFModel`;
+    ``fit_calibration``, ``fit_air_path``, ``fit_tails``, ``scatter`` and
+    ``background_kind`` are passed to :class:`XRFModel`;
     with a fitted calibration, ``FitResult.calibration`` holds the result.
 
     Parameters
@@ -1368,7 +1661,8 @@ def fit_average_spectrum(
                      fit_resolution=fit_resolution, fit_gamma=fit_gamma,
                      escape=escape, pileup_template=pileup_template,
                      fit_pileup=fit_pileup, pileup_tau_us=pileup_tau_us,
-                     fit_calibration=fit_calibration, fit_air_path=fit_air_path)
+                     fit_calibration=fit_calibration, fit_air_path=fit_air_path,
+                     fit_tails=fit_tails, scatter=scatter, background_kind=background_kind)
     p0, bounds = model.initial_guess(yy)
 
     popt, pcov = curve_fit(model, ch, yy, p0=p0, bounds=bounds,
@@ -1639,6 +1933,11 @@ def fit_map(
     -------
     MapResult
     """
+    if getattr(model, "scatter", None) is not None:
+        raise ValueError("fit_map does not handle scatter peaks yet: build the map model "
+                         "without `scatter` (fit them on the average spectrum only).")
+    if getattr(model, "background_kind", "poly") != "poly":
+        raise ValueError("fit_map needs a polynomial background (background_kind='poly').")
     lo, hi = int(model.channels[0]), int(model.channels[-1]) + 1
     raw = np.asarray(raw_spectra, dtype=float)[:, lo:hi]
     s = np.asarray(scale, dtype=float)
@@ -2151,6 +2450,10 @@ def plot_fit(result: FitResult, energy_axis: bool = True, logy: bool = False,
         xref = (g.reference.energy_ev / 1000.0 if energy_axis
                 else cal.channel(g.reference.energy_ev))
         ax.axvline(xref, color=cmap(i % 10), lw=0.8, ls=":", alpha=0.8)
+    if getattr(model, "scatter", None) is not None:
+        for which, col in (("elastic", "0.35"), ("compton", "0.6")):
+            comp = model.scatter_profile(result.popt, which)
+            ax.fill_between(x, bkg, bkg + comp, color=col, alpha=0.35, lw=0, label=f"{which} scatter")
 
     ax.plot(x, result.yfit, "r-", lw=1.4, label="total fit")
 

@@ -74,7 +74,7 @@ SIEGBAHN = {"KL3": "Ka1", "KL2": "Ka2", "KM3": "Kb1", "KM2": "Kb3", "KN3": "Kb2"
             "M5N7": "Ma1", "M4N6": "Mb"}
 
 __all__ = ["Calibrant", "CALIBRANTS", "LineCheck", "CalibrationResult",
-           "coarse_calibration", "calibrate", "plot_calibration"]
+           "coarse_calibration", "calibrate", "plot_calibration", "calibration_from_peaks"]
 
 
 # =============================================================================
@@ -300,6 +300,44 @@ def coarse_calibration(
         logger.warning("Coarse calibration at the edge of the search range (gain %.4f, offset %.0f eV): "
                        "widen it or improve the starting guess.", g_best, o_best)
     return Calibration(gain=g_best, offset=o_best)
+
+
+def calibration_from_peaks(y: np.ndarray, peaks: Sequence[Tuple[float, float]],
+                           half_width: int = 35) -> Tuple[Calibration, List[dict]]:
+    """Linear calibration through reference peaks found near given channels.
+
+    Each peak is located by a Gaussian plus linear-background fit within
+    ``half_width`` channels of its starting channel; the calibration is the
+    least-squares line (exact with two peaks) through (centroid, energy).
+
+    Parameters
+    ----------
+    y : (n_channels,) array
+    peaks : sequence of (channel guess, energy in eV)
+        For an unresolved doublet give its intensity-weighted energy (e.g.
+        K-alpha1/K-alpha2), since that is where the centroid sits.
+
+    Returns
+    -------
+    (Calibration, list of {"channel", "channel_err", "sigma_ch", "energy_ev"})
+    """
+    y = np.asarray(y, dtype=float)
+
+    def model(x, a, c, s, b0, b1):
+        return a * np.exp(-0.5 * ((x - c) / s) ** 2) + b0 + b1 * (x - c)
+
+    found = []
+    for c0, e in peaks:
+        lo, hi = max(int(c0) - half_width, 0), min(int(c0) + half_width + 1, y.size)
+        x, yy = np.arange(lo, hi, dtype=float), y[lo:hi]
+        p0 = [float(yy.max() - yy.min()), float(x[np.argmax(yy)]), half_width / 4.0, float(yy.min()), 0.0]
+        popt, pcov = curve_fit(model, x, yy, p0=p0, sigma=np.sqrt(np.maximum(yy, 1.0)), maxfev=5000)
+        found.append({"channel": float(popt[1]), "channel_err": float(np.sqrt(pcov[1, 1])),
+                      "sigma_ch": abs(float(popt[2])), "energy_ev": float(e)})
+    ch = np.array([f["channel"] for f in found])
+    en = np.array([f["energy_ev"] for f in found])
+    gain, offset = np.polyfit(ch, en, 1)
+    return Calibration(gain=float(gain), offset=float(offset)), found
 
 
 def _line_checks(y: np.ndarray, yerr: Optional[np.ndarray], fit: FitResult,
