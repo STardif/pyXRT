@@ -1,0 +1,284 @@
+% pyXRT -- code reference
+%
+% Build (XeLaTeX; on the ESRF cluster: `module load xelatex`):
+%     python make_listings.py        # extract the code shown in the listings
+%     xelatex pyxrt_code_reference && bibtex pyxrt_code_reference
+%     xelatex pyxrt_code_reference && xelatex pyxrt_code_reference
+%
+% The listings are copied from the modules by make_listings.py, with their true
+% line numbers; rerun it whenever the code changes.  It also reports functions
+% that this document does not include yet.
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.3cm,headheight=14pt]{geometry}
+\usepackage{fontspec}
+\setmonofont{DejaVu Sans Mono}[Scale=MatchLowercase]
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,tabularx,longtable,array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[most]{tcolorbox}
+\usepackage{enumitem}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit}
+\usepackage{fancyhdr}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=green!35!black,
+            urlcolor=blue!60!black,bookmarksnumbered=true]{hyperref}
+
+\input{listings/source_version.tex}
+
+% ---------------------------------------------------------------- code listings
+\definecolor{codebg}{gray}{0.965}
+\definecolor{codekw}{RGB}{0,60,150}
+\definecolor{codestr}{RGB}{150,60,0}
+\definecolor{codecom}{RGB}{0,110,40}
+\newcommand{\listingtitle}[1]{\footnotesize\itshape #1}
+\lstset{
+  language=Python, basicstyle=\ttfamily\scriptsize, keywordstyle=\color{codekw}\bfseries,
+  stringstyle=\color{codestr}, commentstyle=\color{codecom}\itshape,
+  numbers=left, numberstyle=\tiny\color{gray}, numbersep=6pt, stepnumber=1,
+  backgroundcolor=\color{codebg}, frame=leftline, framerule=0.6pt, rulecolor=\color{gray!60},
+  xleftmargin=2.2em, framexleftmargin=0.4em,
+  breaklines=true, breakatwhitespace=false, postbreak=\mbox{\textcolor{gray}{$\hookrightarrow$}\space},
+  showstringspaces=false, extendedchars=true, columns=fullflexible, keepspaces=true,
+  tabsize=4, upquote=true, aboveskip=0.6em, belowskip=0.8em,
+  morekeywords={self,None,True,False,async,await,nonlocal},
+}
+%  \pycode{module}{qualified name}: listing extracted by make_listings.py
+\newcommand{\pycode}[2]{\input{listings/#1/#2.tex}}
+
+% ---------------------------------------------------------------- notation
+\newcommand{\fn}[1]{\texttt{\detokenize{#1}}}          % code name in text
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\e}{\mathrm{e}}
+\newcommand{\erfc}{\operatorname{erfc}}
+\newcommand{\erfcx}{\operatorname{erfcx}}
+\newcommand{\sign}{\operatorname{sign}}
+
+% one entry of the API: \api[name(s)]{full signature(s)} -- the names go to the
+% heading and the table of contents, the signatures to a shaded box below
+\newtcolorbox{sig}{colback=gray!9,colframe=gray!9,boxrule=0pt,arc=0pt,left=5pt,right=5pt,
+  top=3pt,bottom=3pt,before upper={\raggedright\small}}
+\newcommand{\api}[2][]{%
+  \if\relax\detokenize{#1}\relax
+    \subsubsection{#2}%
+  \else
+    \subsubsection{#1}\begin{sig}#2\end{sig}%
+  \fi}
+\newcommand{\blk}[1]{\par\smallskip\noindent\textbf{#1}\quad}
+% argument lists
+\newenvironment{args}{\begin{description}[style=nextline,leftmargin=1.6em,itemsep=1pt,topsep=2pt,font=\normalfont\ttfamily\small]}{\end{description}}
+% boxes for hypotheses and warnings
+\newtcolorbox{hyp}{colback=blue!3,colframe=blue!40!black,boxrule=0.4pt,arc=1pt,
+  left=4pt,right=4pt,top=2pt,bottom=2pt,fonttitle=\bfseries\small,title=Hypotheses and limits}
+\newtcolorbox{issue}{colback=red!3,colframe=red!50!black,boxrule=0.4pt,arc=1pt,
+  left=4pt,right=4pt,top=2pt,bottom=2pt,fonttitle=\bfseries\small,title=Known issue}
+
+\setlength{\emergencystretch}{3em}
+\setcounter{tocdepth}{3}
+\setcounter{secnumdepth}{3}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\itshape pyXRT code reference}
+\fancyhead[R]{\small\itshape\nouppercase{\leftmark}}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+\title{\textbf{pyXRT}: code reference\\[4pt]
+\large Functions, arguments, hypotheses and the physics behind them}
+\author{Samuel Tardif\\[2pt]
+\small CRG-IF BM32, European Synchrotron Radiation Facility, Grenoble, France}
+\date{\small Listings taken from commit \sourceversion{} -- document compiled \today}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+\noindent
+\textbf{pyXRT} gathers the Python tools used on the CRG-IF BM32 beamline of the ESRF to read
+BLISS data files, reduce series of Laue diffraction images, and analyse X-ray fluorescence
+(XRF) spectra recorded under white-beam (Laue) or monochromatic excitation. This document is
+the reference of every module of the repository: for each class and function it states what
+the code does, the arguments it takes and what it returns, the physical model and the
+hypotheses it rests on, and the scientific literature behind it, and it shows the code itself
+next to the explanation, with the line numbers of the source file. The fluorescence modules
+form a complete fundamental-parameter chain---incident spectrum of a bending magnet through
+mirrors and filters, flux-weighted fluorescence cross-sections, matrix absorption and
+secondary fluorescence in layered samples, a constrained spectrum model with detector
+response, escape and pile-up peaks and scatter peaks, a linear per-pixel map solve, and the
+energy calibration---and are described in the most detail. The older scripts (SPEC reader,
+phase-retarder tools, webcam Fourier transform, first fluorescence fitter) are documented
+too, with their limits, including those that keep some of them from running on current Python
+installations.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+%==========================================================================================
+\section{Introduction}
+%==========================================================================================
+
+\subsection{What the repository contains}
+
+The repository is a flat collection of Python modules (no package structure: each module is
+imported by its file name from the repository folder) and of Jupyter notebooks that chain
+them into analyses. Table~\ref{tab:modules} lists the modules, their size, their role and
+what they import from each other; Fig.~\ref{fig:deps} shows the same dependencies as a graph.
+
+\begin{table}[h]
+\centering\small
+\caption{Modules of pyXRT, in the order of this document. ``Lines'' counts every line of
+the file, docstrings included.}
+\label{tab:modules}
+\begin{tabularx}{\textwidth}{@{}l r X l@{}}
+\toprule
+Module & Lines & Role & Uses \\
+\midrule
+\fn{bliss_hdf5_reader} & 852 & Reads any scan of a BLISS HDF5 master file: metadata, scan
+geometry, counters, MCA spectra, detector frames. & -- \\
+\fn{xrf_beamline} & 820 & Incident spectrum of a bending magnet through mirrors, windows,
+slits and air; BM32 model; monochromatic sources. & -- \\
+\fn{xrf_matrix} & 703 & Primary and secondary fluorescence in a stack of layers;
+self-consistent quantification of a layer. & \fn{xrf_beamline} \\
+\fn{xrf_fit} & 2474 & Spectrum model (line groups, detector response, escape, pile-up,
+scatter), fits of single spectra and of maps, diagnostics. & \fn{xrf_beamline},
+\fn{xrf_matrix} \\
+\fn{xrf_calibration} & 559 & Energy calibration on reference samples (AXO thin films) or on
+known peaks. & \fn{xrf_fit}, \fn{xrf_beamline} \\
+\fn{reduce_image_series} & 266 & Pixel-wise minimum, maximum and mean of the detector frames
+of a scan (command line). & \fn{bliss_hdf5_reader} \\
+\fn{make_dynamic_mosaic} & 358 & Region of interest of every frame of a mesh: mosaic,
+entropy, peak-to-mean and centre-of-mass maps (command line). & \fn{bliss_hdf5_reader} \\
+\fn{fluo_map_fit} & 169 & First per-pixel fluorescence fitter (two constrained doublets);
+superseded by \fn{xrf_fit}. & -- \\
+\fn{spec_reader} & 383 & Reader of SPEC data files (2016). & -- \\
+\fn{xray_tools} & 155 & Wavelength/energy, Bragg angle, flipping ratio of X-ray phase
+retarder scans (SPEC era). & \fn{spec_reader} \\
+\fn{LiveFourierTransform} & 154 & Live Fourier transform of a webcam image (2011, Python 2).
+& -- \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  mod/.style={draw, rounded corners=2pt, font=\ttfamily\small, inner sep=4pt, fill=#1},
+  mod/.default={white},
+  dep/.style={-{Stealth[length=5pt]}, thick, gray!70!black},
+  node distance=6mm and 9mm]
+\node[mod=blue!8] (beam) {xrf\_beamline};
+\node[mod=blue!8, right=of beam] (matrix) {xrf\_matrix};
+\node[mod=blue!8, right=of matrix] (fit) {xrf\_fit};
+\node[mod=blue!8, right=of fit] (cal) {xrf\_calibration};
+\node[mod=green!8, below=12mm of beam, xshift=10mm] (bliss) {bliss\_hdf5\_reader};
+\node[mod=green!8, right=of bliss] (red) {reduce\_image\_series};
+\node[mod=green!8, right=of red] (mos) {make\_dynamic\_mosaic};
+\node[mod=gray!10, below=12mm of bliss, xshift=-10mm] (spec) {spec\_reader};
+\node[mod=gray!10, right=of spec] (xt) {xray\_tools};
+\node[mod=gray!10, right=of xt] (fmf) {fluo\_map\_fit};
+\node[mod=gray!10, right=of fmf] (lft) {LiveFourierTransform};
+\draw[dep] (matrix) -- (beam);
+\draw[dep] (fit) -- (matrix);
+\draw[dep] (fit.north) to[bend right=25] (beam.north);
+\draw[dep] (cal) -- (fit);
+\draw[dep] (cal.north) to[bend right=25] (beam.north);
+\draw[dep] (red) -- (bliss);
+\draw[dep] (mos.south) to[bend left=20] (bliss.south);
+\draw[dep] (xt) -- (spec);
+\end{tikzpicture}
+\caption{Imports between the modules (an arrow points to the module that is imported).
+Blue: fluorescence analysis; green: BLISS data and diffraction images; grey: older or
+superseded tools. The notebooks (Section~\ref{sec:notebooks}) sit on top of the blue modules
+and of \fn{bliss_hdf5_reader}.}
+\label{fig:deps}
+\end{figure}
+
+The physics of the fluorescence chain is explained, with figures from real BM32 data, in the
+technical note \fn{docs/xrf_quantification/xrf_quantification.pdf}; this document is its
+companion on the code side and repeats the equations where a function implements them.
+
+\subsection{Dependencies}
+
+\begin{description}[leftmargin=1.6em,itemsep=1pt,font=\normalfont\ttfamily]
+\item[numpy, scipy] arrays, special functions (Bessel $K_\nu$, $\erfc$, $\erfcx$, Voigt),
+quadrature, and the bounded non-linear least-squares solver of
+\fn{scipy.optimize.curve_fit} (trust-region reflective algorithm
+\citep{Branch1999,Virtanen2020}).
+\item[xraylib] atomic and X-ray data \citep{Brunetti2004,Schoonjans2011}: line energies,
+radiative rates, fluorescence yields, partial photo-ionisation cross-sections, the
+``Kissel'' partial fluorescence cross-sections that include Coster--Kronig transfer,
+attenuation coefficients of elements and compounds, refractive indices, and Hartree--Fock
+Compton profiles \citep{Biggs1975}. Tested with xraylib 4.3.
+\item[h5py] HDF5 files \citep{Collette2013}, including virtual datasets.
+\item[matplotlib] plots (imported inside the plotting functions only).
+\item[fabio, tqdm] TIFF images and progress bars in the image scripts.
+\end{description}
+The analysis environment used on the beamline runs Python~3.12, NumPy~2.5, SciPy~1.18,
+xraylib~4.3 and h5py~3.16.
+
+\subsection{Conventions}\label{sec:conventions}
+
+\paragraph{Units.} The units are part of the argument names wherever a quantity has one
+(\fn{energy_ev}, \fn{thickness_um}, \fn{air_path_cm}, \fn{grazing_angle_mrad} \dots).
+The fluorescence fit works in \textbf{eV} (line energies, widths, calibration), while xraylib
+and the beam and matrix modules work in \textbf{keV}; conversions are explicit in the code.
+Mass attenuation coefficients and cross-sections are in cm$^2$/g, densities in g/cm$^3$, mass
+thicknesses in g/cm$^2$. Angles of the sample geometry are in degrees from the sample
+\emph{surface}; beamline angles are in mrad (mirrors) or \textmu rad (source acceptance).
+
+\paragraph{Spectral flux.} Synchrotron fluxes are given, as is customary, per 0.1\,\%
+bandwidth: $N_{0.1\%}(E)$ photons in the energy interval $\dd E = 10^{-3}E$. Integrals over
+energy need the density per unit energy,
+\begin{equation}
+  \frac{\dd N}{\dd E} = \frac{N_{0.1\%}(E)}{10^{-3}\,E},
+  \label{eq:per-energy}
+\end{equation}
+which \fn{xrf_beamline.per_unit_energy} implements and every function that integrates over the
+incident spectrum applies internally. Forgetting this Jacobian over-weights high energies by
+a factor $E$.
+
+\paragraph{Channels and calibration.} MCA channels are numbered from 0. The energy
+calibration is linear, $E = G\,c + O$ with gain $G$ (eV/channel) and offset $O$ (eV). Channel
+ranges are half-open, $[c_\mathrm{lo}, c_\mathrm{hi})$, as Python slices.
+
+\paragraph{Uncertainties.} All quoted errors are one standard deviation. Fit uncertainties
+come from the covariance matrix of the linearised least-squares problem (Section~\ref{sec:fitting}).
+
+\paragraph{Line names.} Fluorescence lines are named with IUPAC notation (initial vacancy,
+final vacancy): \fn{KL3} is K$\alpha_1$, \fn{L3M5} is L$\alpha_1$, \fn{L2M4} L$\beta_1$,
+\fn{L2N4} L$\gamma_1$, \fn{M5N7} M$\alpha_1$. Table~\ref{tab:siegbahn} in
+Section~\ref{sec:calibration} gives the correspondence used for labels.
+
+\subsection{How to read the function entries}
+
+Each documented class or function has an entry with, in this order: what it does; its
+arguments (name, type, default and meaning) and what it returns; the method, with the
+equations it evaluates; its hypotheses and limits (blue boxes); known problems (red boxes);
+the references; and the code. The listings are copied from the source files by
+\fn{make_listings.py}, so the numbers in their margin are the line numbers of the file at
+commit \sourceversion. Methods are shown without their class indentation. A class listing
+contains the class header, its docstring and its fields; each method follows separately.
+Private helpers (names starting with an underscore) are documented like public functions,
+since they hold much of the physics.
+
+\input{sections/bliss_hdf5_reader.tex}
+\input{sections/xrf_beamline.tex}
+\input{sections/xrf_matrix.tex}
+\input{sections/xrf_fit.tex}
+\input{sections/xrf_calibration.tex}
+\input{sections/image_scripts.tex}
+\input{sections/legacy.tex}
+\input{sections/notebooks.tex}
+
+\clearpage
+\phantomsection
+\addcontentsline{toc}{section}{References}
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+
+\end{document}

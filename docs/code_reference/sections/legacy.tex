@@ -1,0 +1,243 @@
+%==========================================================================================
+\section{Older and superseded tools}\label{sec:legacy}
+%==========================================================================================
+
+These modules predate the current analysis chain. They are kept in the repository for
+reference and for old data, and documented here with the problems that stop them from running
+unchanged on a current installation (Python~3.12, NumPy~2).
+
+%------------------------------------------------------------------------------------------
+\subsection{\texttt{fluo\_map\_fit}: the first fluorescence map fitter}
+%------------------------------------------------------------------------------------------
+
+Fits every spectrum of a BLISS map independently with two ``coupled double Gaussians'' (Ga
+and In), a constant background and \fn{curve_fit}, in parallel over the pixels, and plots the
+two area maps. Each element is a K$\alpha$ peak plus a K$\beta$ peak at a fixed channel
+distance and a fixed amplitude ratio, sharing one width:
+\begin{equation}
+  g(x) = A\,\e^{-(x-c)^2/2\sigma^2} + rA\,\e^{-(x-c-\Delta)^2/2\sigma^2},
+  \qquad \text{area} = A\sigma\sqrt{2\pi}\,(1+r).
+\end{equation}
+
+\begin{issue}
+Superseded by \fn{xrf_fit} (Section~\ref{sec:fit}), which replaces every hard-coded number
+here by tabulated physics. The channel offsets and ratios are hard-coded for a 10\,eV/channel
+calibration (Ga: $\Delta = 101$ channels, $r = 0.13$; the In values are placeholders), as are
+the fitted channel range (800--1330), the starting centres and their bounds, and the input
+file in the \fn{__main__} block. The spectra are not normalised (monitor, live time), the
+widths do not follow the detector resolution law, and K$\beta$/K$\alpha$ is not computed for
+the excitation. The module docstring calls it \fn{constrained_xrf_fitter.py}.
+\end{issue}
+
+\pycode{fluo_map_fit}{_header}
+
+\api[\texttt{coupled\_double\_gaussian}, \texttt{spectrum\_model}]{\texttt{coupled\_double\_gaussian(x, amp\_alpha, cen\_alpha, sigma, delta, ratio)}, \texttt{spectrum\_model(x, bkg, amp\_ga, cen\_ga, sig\_ga, amp\_in, cen\_in, sig\_in)}}
+The doublet above, and the full model: constant background plus the Ga and In doublets.
+\pycode{fluo_map_fit}{coupled_double_gaussian}
+\pycode{fluo_map_fit}{spectrum_model}
+
+\api[\texttt{fit\_single\_spectrum}, \texttt{process\_and\_plot}]{\texttt{fit\_single\_spectrum(args)}, \texttt{process\_and\_plot(h5\_filepath, dataset\_path, scan\_shape)}}
+\fn{fit_single_spectrum} fits one pixel, \fn{args = (index, channels, counts)}, and returns
+\fn{(index, Ga area, In area)} (both \fn{None} if the fit fails). \fn{process_and_plot} loads
+the MCA dataset, slices the channel range, distributes the pixels over a
+\fn{ProcessPoolExecutor} (one core left free, chunks of 100), reshapes the areas to
+\fn{scan_shape} and plots the two maps.
+\pycode{fluo_map_fit}{fit_single_spectrum}
+\pycode{fluo_map_fit}{process_and_plot}
+\pycode{fluo_map_fit}{_tail}
+
+%------------------------------------------------------------------------------------------
+\subsection{\texttt{spec\_reader}: SPEC data files}
+%------------------------------------------------------------------------------------------
+
+SPEC, the control program used on many synchrotron beamlines before BLISS, writes plain-text
+data files: a file header (\texttt{\#F} file name, \texttt{\#E} epoch, \texttt{\#D} date, \texttt{\#O} motor
+names), then for each scan a header (\texttt{\#S} number and command, \texttt{\#D} date, \texttt{\#T} count
+time, \texttt{\#G} geometry, \texttt{\#Q} $hkl$, \texttt{\#P} motor positions, \texttt{\#N} number of columns,
+\texttt{\#L} column labels, \texttt{\#C} comments, \texttt{\#@} MCA and user lines), followed by the data
+columns. \fn{SpecFile} reads the file header and indexes the byte offset of every scan;
+\fn{Scan} reads one scan---or concatenates several similar scans---and exposes every counter
+as an attribute.
+
+\begin{issue}
+\begin{itemize}[nosep,leftmargin=1em]
+\item Files are opened with mode \fn{'rU'}, which was removed in Python~3.11: on the current
+  environment \fn{SpecFile} raises \fn{ValueError: invalid mode: 'rU'} (not caught, since
+  only \fn{IOError} is).
+  Mode \fn{'r'} gives the same universal-newline behaviour in Python~3.
+\item \fn{__detcalib__} uses \fn{np.float}, removed in NumPy~1.24 (only reached for
+  \texttt{\#UDETCALIB} lines).
+\item The XIA handlers are unreachable: a line \texttt{\#@XIAFILE path} gives the key
+  \fn{@XIAFILE}, which is not in the dispatch table, and a line \texttt{\#@ XIAFILE path} reaches
+  \fn{__special__} but splits into an empty first word. Both end as ``unprocessed lines''
+  (checked on the current code), so \fn{xianame}, \fn{xiacalib} and \fn{xiaroi} are never
+  set.
+\end{itemize}
+\end{issue}
+
+\api[\texttt{SpecFile}]{\texttt{SpecFile(spec\_file, verbose=False)}}
+Reads the file header up to the first \texttt{\#S} line, dispatching each line to a handler by its
+key (\fn{__param__} maps the key letters to methods), and records in \fn{scan_dict} the byte
+position of every \texttt{\#S} line, so that a scan can later be read with a single \fn{seek}.
+The key is the text after \texttt{\#}, with trailing digits removed except for user keys starting
+with \fn{U} (so \texttt{\#O0}, \texttt{\#O1} both go to the \fn{O} handler).
+\pycode{spec_reader}{_header}
+\pycode{spec_reader}{SpecFile}
+\pycode{spec_reader}{SpecFile.__param__}
+\pycode{spec_reader}{SpecFile.__readSpecLine__}
+\pycode{spec_reader}{SpecFile.__init__}
+
+\api{Line handlers}
+One method per key, each parsing its line into attributes:
+\fn{__scanline__} (\texttt{\#S}: \fn{number}, \fn{type}, \fn{args}, \fn{command}),
+\fn{__dating__} (\texttt{\#D}), \fn{__counting__} (\texttt{\#T}: \fn{ct}, \fn{ct_units}),
+\fn{__configurating__} (\texttt{\#G}), \fn{__hkl__} (\texttt{\#Q}: \fn{Qo}),
+\fn{__motorslabeling__} and \fn{__motorslabelingnospace__} (\texttt{\#O}, \texttt{\#o}),
+\fn{__positioning__} (\texttt{\#P}), \fn{__speccol__} (\texttt{\#N}: \fn{N}),
+\fn{__counterslabeling__} (\texttt{\#L}: \fn{counters}), \fn{__allcounterslabeling__} and
+\fn{__allcounterslabelingnospace__} (\texttt{\#J}, \texttt{\#j}), \fn{__specfilenaming__} (\texttt{\#F}),
+\fn{__commenting__} (\texttt{\#C}), \fn{__initialepoch__} (\texttt{\#E}), \fn{__marccdpath__}
+(\texttt{\#M}), \fn{__limampx4path__} (\texttt{\#ULIMA\_mpx4}), \fn{__detcalib__} (\texttt{\#UDETCALIB}:
+detector centre, pixels per degree, distances), \fn{__special__} (\texttt{\#@}: dispatches on the
+following word), \fn{__xiafilenaming__}, \fn{__xiacalibrating__}, \fn{__xiaroidefining__}
+(XIA MCA file, calibration and ROIs).
+\pycode{spec_reader}{SpecFile.__scanline__}
+\pycode{spec_reader}{SpecFile.__dating__}
+\pycode{spec_reader}{SpecFile.__counting__}
+\pycode{spec_reader}{SpecFile.__configurating__}
+\pycode{spec_reader}{SpecFile.__hkl__}
+\pycode{spec_reader}{SpecFile.__motorslabeling__}
+\pycode{spec_reader}{SpecFile.__motorslabelingnospace__}
+\pycode{spec_reader}{SpecFile.__positioning__}
+\pycode{spec_reader}{SpecFile.__speccol__}
+\pycode{spec_reader}{SpecFile.__counterslabeling__}
+\pycode{spec_reader}{SpecFile.__allcounterslabeling__}
+\pycode{spec_reader}{SpecFile.__allcounterslabelingnospace__}
+\pycode{spec_reader}{SpecFile.__specfilenaming__}
+\pycode{spec_reader}{SpecFile.__commenting__}
+\pycode{spec_reader}{SpecFile.__initialepoch__}
+\pycode{spec_reader}{SpecFile.__marccdpath__}
+\pycode{spec_reader}{SpecFile.__limampx4path__}
+\pycode{spec_reader}{SpecFile.__detcalib__}
+\pycode{spec_reader}{SpecFile.__special__}
+\pycode{spec_reader}{SpecFile.__xiafilenaming__}
+\pycode{spec_reader}{SpecFile.__xiacalibrating__}
+\pycode{spec_reader}{SpecFile.__xiaroidefining__}
+
+\api[\texttt{Scan}]{\texttt{Scan(spec\_file, scan\_numbers, verbose=False)}}
+Reads one scan, or several concatenated, from a \fn{SpecFile} (or a file name).
+\begin{args}
+\item[spec\_file] a \fn{SpecFile}, or a path (then indexed first).
+\item[scan\_numbers] one scan number, or a sequence of them.
+\item[verbose] print the lines that are read or not processed.
+\end{args}
+\blk{Method} The first scan's header is parsed with the handlers; data lines are read until a
+blank line or a \texttt{\#} line other than \texttt{\#C}. Each further scan is appended if it is
+``similar'': same scan type, same first argument (the scanned motor) and, for commands with
+more than five arguments, the same fourth argument (for an \fn{ascan}, the number of
+intervals); otherwise a message is printed and the scan is skipped. Every column becomes an
+attribute named after its counter label, \fn{motors} maps the motor names to their start
+positions (using the \texttt{\#o} names when motor names contain spaces), and with an \fn{Epoch}
+column the start and end times, duration and time per point are set. A mismatch between
+\texttt{\#N} and the number of labels is reported.
+\pycode{spec_reader}{Scan}
+\pycode{spec_reader}{Scan.__init__}
+\pycode{spec_reader}{_tail}
+
+%------------------------------------------------------------------------------------------
+\subsection{\texttt{xray\_tools}: wavelengths, Bragg angles and flipping ratios}
+%------------------------------------------------------------------------------------------
+
+Small tools from the SPEC era, including the analysis of X-ray phase retarder (XPR) scans: a
+diamond crystal rocked near a Bragg reflection turns the linear polarisation of the beam into
+circular polarisation of opposite helicities on either side of the reflection
+\citep{Hirano1991}, and the \emph{flipping ratio} of a signal measured at symmetric offsets is
+the helicity asymmetry (e.g. an XMCD signal).
+
+\begin{issue}
+\begin{itemize}[nosep,leftmargin=1em]
+\item \fn{xprplot_th} computes \fn{midpoint = n/2}, a float in Python~3, then slices with it:
+  \fn{TypeError}. Integer division (\fn{//}) is needed.
+\item Only \fn{matplotlib} is imported, but \fn{matplotlib.pyplot} is used: it fails unless
+  \fn{pyplot} was imported elsewhere first.
+\item The module does not import on the current environment: \fn{from numpy.linalg.linalg
+  import *} raises \fn{ModuleNotFoundError} with NumPy~2.5 (the submodule was made private in
+  NumPy~2.0; \fn{from numpy.linalg import norm} is the replacement). \fn{from numpy import *}
+  also puts the whole NumPy namespace into the module.
+\item Scans are read with \fn{spec_reader}, which cannot open files on Python~$\ge$~3.11.
+\end{itemize}
+\end{issue}
+
+\pycode{xray_tools}{_header}
+
+\api[\texttt{E2L}, \texttt{L2E}]{\texttt{E2L(energy)}, \texttt{L2E(wavelength)}}
+$\lambda = hc/E$ and $E = hc/\lambda$, in metres and electronvolts, with
+$h = 4.135667516\times10^{-15}$\,eV\,s and $c = 2.99792458\times10^8$\,m/s
+(CODATA 2010, \citealp{Mohr2012}): $hc = 1.2398\times10^{-6}$\,eV\,m.
+\pycode{xray_tools}{E2L}
+\pycode{xray_tools}{L2E}
+
+\api[\texttt{tth}]{\texttt{tth(H, E, a)}}
+Bragg angle $2\theta$ (degrees) of the reflection $\mathbf H = (h,k,l)$ of a cubic crystal of
+lattice parameter $a$ (m) at energy $E$ (eV): $d = a/|\mathbf H|$ and
+$2\theta = 2\arcsin(\lambda/2d)$ \citep{Bragg1913}. Example: (0,0,10) at 10\,871\,eV with
+$a = 10.015$\,\AA\ gives 69.42\textdegree.
+\pycode{xray_tools}{tth}
+
+\api[\texttt{uncertainty\_fr}]{\texttt{uncertainty\_fr(p, n, po, no)}}
+Flipping ratio and its uncertainty from the detector counts $p$, $n$ and monitor counts
+$p_o$, $n_o$ for the two helicities:
+\begin{equation}
+  \mathrm{FR} = \frac{P-N}{P+N}, \quad P = \frac{p}{p_o},\ N = \frac{n}{n_o}; \qquad
+  \delta\mathrm{FR} = \sum_{x\in\{p,n,p_o,n_o\}}\left|\frac{\partial\,\mathrm{FR}}{\partial x}\right|
+  \sqrt x ,
+\end{equation}
+with, for instance, $\partial\mathrm{FR}/\partial p = 2N/[p_o(P+N)^2]$. Returns
+\fn{(dfr, fr)}.
+\begin{hyp}
+Poisson statistics for all four counts. The contributions are added linearly, which is an
+upper bound; independent errors would add in quadrature \citep{Bevington2003}, giving a value
+up to two times smaller.
+\end{hyp}
+\pycode{xray_tools}{uncertainty_fr}
+
+\api[\texttt{xprplot\_th}]{\texttt{xprplot\_th(spec\_file, scan\_number, detector, monitor, centered=True, do\_plot=True, save=False, auto\_close=False)}}
+Processes an XPR angle scan measured symmetrically about the centre of the phase-retarder
+Bragg peak: the second half of the scan gives one helicity ($p$, $p_o$) and the first half,
+reversed, the other ($n$, $n_o$), at the same offsets; the centre point is skipped for an odd
+number of points. Computes the flipping ratio at each offset, optionally plots and saves it
+(PDF, EMF, PNG). Returns \fn{(offsets, fr, dfr)}. Non-centred scans are not implemented.
+\pycode{xray_tools}{xprplot_th}
+
+\api[\texttt{XprScan}, \texttt{XprScan.fr}]{\texttt{XprScan}, \texttt{XprScan.fr(detector, monitor, ...)}}
+A \fn{spec_reader.Scan} with a method that runs \fn{xprplot_th} on itself and stores the
+offsets, flipping ratio and error as attributes (\fn{xpr_offset}, \fn{<detector>_fr},
+\fn{<detector>_dfr}).
+\pycode{xray_tools}{XprScan}
+\pycode{xray_tools}{XprScan.fr}
+
+%------------------------------------------------------------------------------------------
+\subsection{\texttt{LiveFourierTransform}: webcam Fourier transform}
+%------------------------------------------------------------------------------------------
+
+A demonstration script (2011, from a Matlab original by B.~R. Pauw) that grabs webcam frames,
+computes the two-dimensional Fourier transform of a region of interest and displays, side by
+side, the real-space image, the logarithm of the intensity $|F|^2$, of the modulus $|F|$, and
+the phase of the transform, each scaled to 8 bits. It illustrates that a far-field
+(Fraunhofer) diffraction pattern is the squared modulus of the Fourier transform of the object
+\citep{Goodman2005}, and that the phase---lost in a diffraction measurement---carries much of
+the information. The transform uses the FFT \citep{Cooley1965} with the zero frequency shifted
+to the centre; the optional ``kill centre lines'' replaces the central row and column (which
+hold the strong contributions of the image borders) by their neighbours to increase the
+dynamic range.
+
+\begin{issue}
+Python~2 code (\fn{print} statement, integer division \fn{h/2} for indexing) using the
+OpenCV~1.x Python bindings (\fn{opencv}, \fn{highgui}) and the old \fn{Image} module of PIL;
+\fn{numpy} and its functions (\fn{angle}, \fn{log10}, \fn{ones}, \fn{uint8}, \fn{transpose},
+\fn{append}) are used without being imported. It does not run on a current installation and
+is kept as a historical record. Because it is not valid Python~3, the listing shows the whole
+file.
+\end{issue}
+
+\pycode{LiveFourierTransform}{_file}

@@ -1,0 +1,185 @@
+%==========================================================================================
+\section{\texttt{xrf\_calibration}: energy calibration}\label{sec:calibration}
+%==========================================================================================
+
+\subsection{Overview}
+
+The channel-to-energy relation $E = Gc+O$ of the detector drifts with the electronics
+settings (peaking time, gain, number of bins) and must be measured. The module does it on the
+spectrum of a reference sample in four steps:
+\begin{enumerate}[nosep]
+\item \textbf{coarse match}: the calibrant's tabulated lines are compared with the measured
+  peaks over a grid of gains and offsets; no peak has to be picked or assigned by hand;
+\item \textbf{global fit}: the constrained model of \fn{xrf_fit} with the gain and offset
+  free, so that every line sits at its tabulated energy with tabulated relative intensities
+  and unresolved multiplets (K$\alpha_{1,2}$, L$\beta_{1-4}$) are placed correctly instead of
+  being treated as single peaks; the resolution, and optionally the sample--detector air path
+  (from the line ratios within each element), are fitted at the same time;
+\item \textbf{line checks}: the strongest peaks are refitted one at a time with only an
+  energy shift free; the shifts should scatter around zero within their errors, and a trend
+  with energy reveals a non-linear response;
+\item \textbf{intensity check}: for a thin-film calibrant of certified loadings, the
+  reference-line areas should follow $A = k\,L\,S$ with $L$ the loading, $S$ the group's
+  \fn{ref_strength} and one overall scale $k$; this tests the excitation and efficiency
+  models, not the calibration.
+\end{enumerate}
+\fn{calibration_from_peaks} offers a simpler route when two or more peaks of known energy
+can be located (e.g. a fluorescence line and the elastic peak of a monochromatic beam).
+
+\begin{hyp}
+\begin{itemize}[nosep,leftmargin=1em]
+\item The response is linear in energy over the calibrated range (tested by the line
+  checks).
+\item Thin-film calibrants (a few atomic layers on a membrane, like the AXO samples) need no
+  matrix correction; the intensity check assumes it.
+\item The L-line ratios used for the air path depend somewhat on the excitation spectrum,
+  which is the main systematic error of the fitted path.
+\end{itemize}
+\end{hyp}
+
+\begin{table}[h]
+\centering\small
+\caption{IUPAC and Siegbahn names of the common lines (\fn{SIEGBAHN}, used for labels).}
+\label{tab:siegbahn}
+\begin{tabular}{@{}llllllll@{}}
+\toprule
+IUPAC & Siegbahn & IUPAC & Siegbahn & IUPAC & Siegbahn & IUPAC & Siegbahn\\
+\midrule
+KL3 & K$\alpha_1$ & KL2 & K$\alpha_2$ & KM3 & K$\beta_1$ & KM2 & K$\beta_3$\\
+KN3 & K$\beta_2$ & L3M5 & L$\alpha_1$ & L3M4 & L$\alpha_2$ & L2M4 & L$\beta_1$\\
+L3N5 & L$\beta_2$ & L1M3 & L$\beta_3$ & L1M2 & L$\beta_4$ & L2N4 & L$\gamma_1$\\
+L1N3 & L$\gamma_3$ & L3M1 & L$\ell$ & L2M1 & L$\eta$ & M5N7 & M$\alpha_1$\\
+M4N6 & M$\beta$ & & & & & &\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\pycode{xrf_calibration}{_header}
+
+\subsection{Reference samples and results}
+
+\api[\texttt{Calibrant}; \texttt{elements}, \texttt{atom\_ratio}]{\texttt{Calibrant(name, loadings\_ng\_mm2, description="")}; \texttt{elements}, \texttt{atom\_ratio(element, reference)}}
+A reference sample: its certified areal densities (ng/mm$^2$) by element. \fn{elements} lists
+them; \fn{atom_ratio} gives the certified atom-number ratio,
+$(L_e/W_e)/(L_r/W_r)$ with $W$ the atomic weights.
+\pycode{xrf_calibration}{Calibrant}
+\pycode{xrf_calibration}{Calibrant.elements}
+\pycode{xrf_calibration}{Calibrant.atom_ratio}
+
+\api[\texttt{CALIBRANTS}, \texttt{LineCheck}]{\texttt{CALIBRANTS}, \texttt{LineCheck(label, energy\_ev, channel, shift\_ev, shift\_err\_ev)}}
+\fn{CALIBRANTS} holds the known samples; at present the AXO Dresden RF-type C10 standard: Pb
+84.9, La 121.4, Pd 23.3, Mo 8.6, Cu 22.2 and Fe 43.9\,ng/mm$^2$ on a 200\,nm Si membrane. To add
+a calibrant, add an entry. A \fn{LineCheck} records one peak measured on its own:
+\fn{shift_ev} is the energy that the calibration gives the measured peak minus the tabulated
+energy (positive: the peak sits at a higher channel than predicted). The listing of
+\fn{LineCheck} starts with \fn{CALIBRANTS}, which precedes it in the file.
+\pycode{xrf_calibration}{LineCheck}
+
+\api{\texttt{CalibrationResult}}
+Outcome of \fn{calibrate}: the fitted \fn{calibration}, the $2\times2$ \fn{covariance} of
+(gain, offset), the coarse \fn{start}, the global \fn{fit} (\fn{FitResult}), the input
+\fn{detector} with the fitted resolution and air path, the \fn{calibrant}, the line
+\fn{checks}, the \fn{intensity} check and \fn{air_path_err}.
+\blk{Methods} \fn{gain_err}, \fn{offset_err}; \fn{energy_error(channel)}, the one-sigma
+uncertainty of the calibrated energy including the gain--offset correlation,
+\begin{equation}
+  \sigma_E^2(c) = c^2\,V_{GG} + 2c\,V_{GO} + V_{OO};
+\end{equation}
+\fn{check_chi2()}, the mean of $(\text{shift}/\text{error})^2$ over the line checks (about 1
+when the response is linear within the precision); \fn{summary()}, a text report;
+\fn{to_dict()}, a plain record to save as JSON.
+\pycode{xrf_calibration}{CalibrationResult}
+\pycode{xrf_calibration}{CalibrationResult.gain_err}
+\pycode{xrf_calibration}{CalibrationResult.offset_err}
+\pycode{xrf_calibration}{CalibrationResult.energy_error}
+\pycode{xrf_calibration}{CalibrationResult.check_chi2}
+\pycode{xrf_calibration}{CalibrationResult.summary}
+\pycode{xrf_calibration}{CalibrationResult.to_dict}
+
+\subsection{Procedure}
+
+\api[\texttt{coarse\_calibration}]{\texttt{coarse\_calibration(y, groups, gain=10.0, offset=0.0, gain\_tolerance=0.1, offset\_tolerance\_ev=500.0, smooth\_ch=4.0)}}
+Grid search of the calibration that best matches the line pattern. The background is removed
+(SNIP), the spectrum smoothed with a Gaussian of \fn{smooth_ch} channels and square-rooted (so
+that weak elements count), and each candidate $(G, O)$ is scored by
+\begin{equation}
+  \mathrm{score}(G,O) = \sum_l r_l\,\sqrt{y_\mathrm{net}}\!\left(\frac{E_l-O}{G}\right),
+\end{equation}
+interpolated at the predicted channel of every line. Gains span $\pm$\fn{gain_tolerance}
+(801 values) and offsets $\pm$\fn{offset_tolerance_ev} in 2\,eV steps; one gain is scanned at
+a time to bound memory. A warning is issued if the best point lies at the edge of the range.
+Returns a \fn{Calibration}.
+\pycode{xrf_calibration}{coarse_calibration}
+
+\api[\texttt{calibration\_from\_peaks}]{\texttt{calibration\_from\_peaks(y, peaks, half\_width=35)}}
+Linear calibration through reference peaks near given channels.
+\begin{args}
+\item[y] the spectrum.
+\item[peaks] \fn{[(channel guess, energy in eV), ...]}; for an unresolved doublet give its
+  intensity-weighted energy (e.g. K$\alpha_{1,2}$), since that is where the centroid sits.
+\item[half\_width] half width of the fitting window, channels.
+\end{args}
+\blk{Method} Each peak is fitted within \fn{half_width} channels of its guess with a Gaussian
+on a linear background, Poisson weights; the calibration is the least-squares line through
+(centroid, energy), exact with two peaks.
+\blk{Returns} \texttt{(Calibration, [\{channel, channel\_err, sigma\_ch, energy\_ev\}])}.
+\begin{hyp}
+Each peak is a single Gaussian (or an unresolved multiplet whose centroid is its weighted
+energy) on a linear background inside the window; a nearby peak inside the window biases the
+centroid.
+\end{hyp}
+\pycode{xrf_calibration}{calibration_from_peaks}
+
+\api[\texttt{\_line\_checks}]{\texttt{\_line\_checks(y, yerr, fit, detector, escape, refit\_groups=None, min\_fraction=0.05, half\_width\_fwhm=1.5)}}
+Refits the strongest peaks one at a time. Candidate lines are ranked by their fitted area
+(group area $\times$ relative intensity); lines above \fn{min_fraction} of the strongest and
+more than one FWHM from an already chosen line are kept. Each window spans $\pm1.5$\,FWHM and
+keeps the groups that contribute at least 2\,\% of the modelled peak signal there (from the
+global fit). The local fit frees only the calibration offset (\fn{fit_calibration="offset"}),
+the amplitudes and a linear background, with the resolution of the global fit; the measured
+peak energy relative to the calibration is minus the change of offset. \fn{refit_groups}
+replace groups by label (e.g. groups rebuilt at the fitted air path). Failed fits are skipped
+with a warning.
+\pycode{xrf_calibration}{_line_checks}
+
+\api[\texttt{\_intensity\_model}]{\texttt{\_intensity\_model(fit, calibrant, detector, air\_path\_cm)}}
+Compares the reference-line areas of the certified elements (one family per element, the most
+precise) with $A_e = k\,L_e\,S_e\,\e^{-\mu_\mathrm{air}(E_e)(d-d_0)}$, where $S_e$ was computed at
+the air path $d_0$ of the detector and $d$ is the fitted one. Only $k$ is fitted, by weighted
+least squares on the elements detected above $3\sigma$:
+\begin{equation}
+  k = \frac{\sum_e w_e A_e m_e}{\sum_e w_e m_e^2}, \qquad w_e = \sigma_{A_e}^{-2},
+  \quad m_e = L_eS_e\e^{-\mu(d-d_0)} .
+\end{equation}
+Returns the scale, the reduced $\chi^2$ and one row per element (measured/predicted ratio and
+its error); empty with fewer than two usable elements.
+\pycode{xrf_calibration}{_intensity_model}
+
+\api[\texttt{calibrate}]{\texttt{calibrate(y, calibrant, detector, yerr=None, roi\_ev=(2500.0, 19500.0), gain=10.0, offset=0.0, extra\_elements=(), families=("K","L","M"), incident\_spectrum=None, e0\_eff\_kev=20.0, background\_order=5, escape=True, min\_rel=0.01, coarse=True, check\_lines=True, fit\_air\_path=False, **coarse\_kw)}}
+The complete procedure.
+\begin{args}
+\item[y] spectrum of the calibrant (raw counts or normalised; one measurement or a sum).
+\item[calibrant] e.g. \fn{CALIBRANTS["AXO RF C10"]}.
+\item[detector] starting resolution and efficiency model.
+\item[yerr] errors (default Poisson, $\sqrt{\max(y,1)}$: right for raw counts only).
+\item[roi\_ev] fitted energy window.
+\item[gain, offset] starting guess.
+\item[extra\_elements] elements present besides the certified ones (Ar from the air,
+  contaminants), with their own amplitudes.
+\item[families, incident\_spectrum, e0\_eff\_kev, min\_rel] as in \fn{element_line_groups}.
+\item[background\_order, escape] as in \fn{fit_average_spectrum}.
+\item[coarse] run the coarse match (else start from \fn{gain}, \fn{offset}).
+\item[check\_lines] run the line checks.
+\item[fit\_air\_path] fit the sample--detector air path.
+\item[coarse\_kw] search ranges for \fn{coarse_calibration}.
+\end{args}
+\blk{Returns} a \fn{CalibrationResult}. After the global fit the detector is updated with the
+fitted resolution and air path; with a fitted air path the groups are rebuilt at that path
+before the line checks, so that their relative intensities include it.
+\pycode{xrf_calibration}{calibrate}
+
+\api[\texttt{plot\_calibration}]{\texttt{plot\_calibration(result, logy=True)}}
+Two figures: the global fit (\fn{plot_fit}) and the line checks---shift versus energy with
+error bars and the one-sigma band of the calibration, $\pm\sigma_E(c)$. Returns
+\fn{(fig_fit, fig_checks)}, the second \fn{None} without line checks.
+\pycode{xrf_calibration}{plot_calibration}

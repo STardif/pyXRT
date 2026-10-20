@@ -1,0 +1,305 @@
+%==========================================================================================
+\section{\texttt{xrf\_matrix}: matrix effects in layered samples}\label{sec:matrix}
+%==========================================================================================
+
+\subsection{Overview and physics}
+
+The fluorescence intensity of an element is proportional to its concentration only in an
+infinitely thin sample. In a real sample the incident beam is attenuated on its way in, the
+fluorescence on its way out (\emph{primary absorption}), and the fluorescence of one element
+can excite another (\emph{secondary fluorescence}). The module computes both for a stack of
+homogeneous layers---cap, film, substrate---of arbitrary thickness, the last one possibly
+infinitely thick, under polychromatic excitation. It follows the fundamental-parameter
+approach of \citet{Sherman1955} and \citet{Shiraiwa1966}, extended to multilayers
+\citep{Mantler1986,deBoer1990}; see also the handbook of \citet{VanGrieken2002}.
+
+\paragraph{Notation.} Layers are numbered from the surface, $k = 0,1,\dots$; layer $k$ has
+density $\rho_k$, thickness $t_k$ and mass thickness $M_k = \rho_k t_k$ (infinite for a bulk
+last layer). The beam meets the surface at the angle $\psi_\mathrm{in}$, the detector sees it
+at the take-off angle $\psi_\mathrm{out}$, both measured from the surface. $\mu_k(E)$ is the
+total mass attenuation coefficient of layer $k$, $Q_{il}(E)$ the partial fluorescence
+cross-section of line $l$ of element $i$ (xraylib \fn{CS_FluorLine_Kissel}, cm$^2$/g:
+photo-ionisation of the subshell, Coster--Kronig transfers, fluorescence yield and radiative
+rate), $w_i^k$ the mass fraction of $i$ in layer $k$, and $\dd\Phi/\dd E$ the incident
+density per keV. Write
+\begin{equation}
+  a_k(E) = \frac{\mu_k(E)}{\sin\psi_\mathrm{in}}, \qquad
+  b_k = \frac{\mu_k(E_l)}{\sin\psi_\mathrm{out}}, \qquad
+  F(c;M) = \int_0^M \e^{-cm}\dd m = \frac{1-\e^{-cM}}{c}, \qquad
+  G(x,y;M) = \int_0^M \e^{-xm}\e^{-y(M-m)}\dd m .
+\end{equation}
+
+\paragraph{Primary fluorescence.} A photon of energy $E$ reaching mass depth $m$ of layer
+$k$ has crossed $m/\sin\psi_\mathrm{in}$ of it; the probability that it produces line $l$ of
+element $i$ in the slab $\dd m$ is $w_i^k Q_{il}(E)\,\dd m/\sin\psi_\mathrm{in}$, and the
+fluorescence photon reaching the detector has crossed $m/\sin\psi_\mathrm{out}$. Integrating
+over the depth and over the spectrum, and leaving out the solid angle and the detection
+efficiency (common to all lines and applied by \fn{xrf_fit.Detector.efficiency}), the
+sensitivity per unit mass fraction is
+\begin{equation}
+  P_{il}^k = T_\mathrm{out}^k \int \frac{\dd\Phi}{\dd E}\,\frac{Q_{il}(E)}{\sin\psi_\mathrm{in}}\,
+  T_\mathrm{in}^k(E)\,F\!\left(a_k(E)+b_k;\,M_k\right)\dd E,
+  \label{eq:primary}
+\end{equation}
+with the overlayer transmissions $T_\mathrm{in}^k(E) = \exp(-\sum_{c<k}a_c M_c)$ and
+$T_\mathrm{out}^k = \exp(-\sum_{c<k}b_c M_c)$. In the thin limit $F \to M_k$ (no
+absorption); for a bulk layer $F = 1/(a_k+b_k)$, Sherman's equation.
+
+\paragraph{Secondary fluorescence.} Line $j$ (energy $E_j$) of an element of layer $a$,
+produced by the beam at depth $m'$, is emitted isotropically. From a plane source the
+fraction absorbed at a distance $x$ (in mass thickness) per unit thickness is
+$\frac12\int_0^1 \mu\,\e^{-\mu x/u}\,\dd u/u$ with $u$ the direction cosine; replacing $\mu$
+by the partial cross-section $w_i^k Q_{il}(E_j)$ gives the rate of secondary emission of line
+$l$. With $\kappa_c = \mu_c(E_j)/u$ the depth integrals are closed-form for every $u$:
+\begin{align}
+  S_{il}^k &= T_\mathrm{out}^k \sum_{a,j} \tfrac12\,Q_{il}(E_j)\,w_j^a \int
+  \frac{\dd\Phi}{\dd E}\,\frac{Q_j(E)}{\sin\psi_\mathrm{in}}\,T_\mathrm{in}^a(E)
+  \int_0^1 K_{ak}(E,u)\,\frac{\dd u}{u}\,\dd E, \label{eq:secondary}\\
+  a = k:&\quad K = D(a_k, b_k, \kappa_k; M_k) = \int_0^{M_k}\!\!\int_0^{M_k}
+  \e^{-a_k m' - b_k m - \kappa_k|m-m'|}\,\dd m\,\dd m', \notag\\
+  a < k:&\quad K = G(a_a,\kappa_a;M_a)\;\e^{-\sum_{a<c<k}\kappa_c M_c}\;F(b_k+\kappa_k;M_k),
+  \notag\\
+  a > k:&\quad K = F(a_a+\kappa_a;M_a)\;\e^{-\sum_{k<c<a}\kappa_c M_c}\;G(b_k,\kappa_k;M_k).
+  \notag
+\end{align}
+The same-layer double integral has the closed form
+\begin{equation}
+  D(a,b,\kappa;M) = \frac{F(a+\kappa)-F(a+b)}{b-\kappa} + \frac{F(b+\kappa)-F(a+b)}{a-\kappa},
+  \label{eq:D}
+\end{equation}
+(both terms written with $F(\cdot) = F(\cdot\,;M)$), obtained by splitting the domain at
+$m=m'$; when $b\to\kappa$ or $a\to\kappa$ the corresponding quotient becomes $-F'(a+\kappa)$
+or $-F'(b+\kappa)$. For a single bulk layer Eq.~\eqref{eq:secondary} reduces to the classical
+$\left[\ln(1+a/\mu_j)/a + \ln(1+b/\mu_j)/b\right]/[2(a+b)]$ \citep{Shiraiwa1966}; for a thin
+layer it gives the logarithmic thin-film enhancement. The integral over $u$ is computed on a
+logarithmic grid ($\int_0^1 f\,\dd u/u = \int f\,\dd(\ln u)$), which resolves the grazing paths
+that dominate in thin films.
+
+The measured intensity of line $l$ of element $i$ is then
+\begin{equation}
+  I_{il} \propto \epsilon(E_l)\sum_k w_i^k\left(P_{il}^k + S_{il}^k\right).
+\end{equation}
+
+\begin{hyp}
+\begin{itemize}[nosep,leftmargin=1em]
+\item Homogeneous layers with flat, parallel, sharp interfaces and infinite lateral extent;
+  no roughness, interdiffusion or lateral inhomogeneity.
+\item A single incidence and take-off angle (point-like beam footprint seen from a distant
+  detector).
+\item No refraction and no total external reflection: at incidence angles comparable to the
+  critical angle (a few mrad) the penetration of the beam is not the geometrical one
+  assumed here.
+\item Secondary fluorescence from the lines of the stack's own elements only (contaminants
+  do not excite), lines above 1\,keV, and lines contributing at least \fn{exciter_min_rel}
+  of their element's strongest line. No tertiary fluorescence and no excitation by
+  scattered radiation or by photo- or Auger electrons.
+\item The secondary term is smooth in $E$ and is evaluated on a decimated energy grid.
+\end{itemize}
+\end{hyp}
+
+\pycode{xrf_matrix}{_header}
+
+\subsection{Cached cross-sections}
+
+\api[\texttt{\_grid\_key}, \texttt{\_cs\_total}, \texttt{\_cs\_fluor}, \texttt{\_cs\_fluor\_scalar}]{\texttt{\_grid\_key(e)}, \texttt{\_cs\_total(z, e\_kev)}, \texttt{\_cs\_fluor(z, macro, e\_kev)}, \texttt{\_cs\_fluor\_scalar(z, macro, e\_kev)}}
+xraylib is called one energy at a time, so the cross-sections on the spectrum's energy grid
+are computed once and cached, keyed by the element, the line and a hash of the grid.
+\fn{_cs_fluor} returns zero below the edge (where xraylib raises \fn{ValueError}) and clips
+negative values. \fn{_IUPAC_LINES} holds the IUPAC line macros only (see
+Section~\ref{sec:lines} for why the Siegbahn names are excluded).
+\pycode{xrf_matrix}{_grid_key}
+\pycode{xrf_matrix}{_cs_total}
+\pycode{xrf_matrix}{_cs_fluor}
+\pycode{xrf_matrix}{_cs_fluor_scalar}
+
+\subsection{Geometry and sample}
+
+\api[\texttt{Geometry}]{\texttt{Geometry(incidence\_deg=40.0, takeoff\_deg=40.0)}}
+Incidence and take-off angles in degrees from the surface, and their sines (properties
+\fn{sin_in}, \fn{sin_out}). Both default to 40\textdegree; set them to the geometry of the
+measurement, since the path lengths scale as $1/\sin\psi$.
+\pycode{xrf_matrix}{Geometry}
+\pycode{xrf_matrix}{Geometry.sin_in}
+\pycode{xrf_matrix}{Geometry.sin_out}
+
+\api[\texttt{Layer}]{\texttt{Layer(composition, density\_g\_cm3, thickness\_um=None, name="")}}
+A homogeneous layer.
+\begin{args}
+\item[composition] a formula (\fn{"In0.5Ga0.5As"}) or \texttt{\{symbol: atoms\}}; only atomic
+  proportions matter.
+\item[density\_g\_cm3] density.
+\item[thickness\_um] thickness; \fn{None} or \fn{inf} for a bulk layer.
+\item[name] label.
+\end{args}
+\blk{Attributes} \fn{formula}, \fn{mass_fractions} (\texttt{\{Z: w\}}, from xraylib's
+\fn{CompoundParser}), \fn{atoms} (\texttt{\{symbol: n\}}), \fn{density_g_cm3},
+\fn{thickness_um}. \fn{mass_thickness} is $\rho t$ in g/cm$^2$ (infinite for bulk);
+\fn{mu(e_kev)} is $\mu(E) = \sum_i w_i(\mu/\rho)_i(E)$, cm$^2$/g, with the cache for grids of
+more than 8 points; \fn{with_composition} and \fn{with_thickness} return modified copies.
+\pycode{xrf_matrix}{Layer}
+\pycode{xrf_matrix}{Layer.__init__}
+\pycode{xrf_matrix}{Layer.mass_thickness}
+\pycode{xrf_matrix}{Layer.mu}
+\pycode{xrf_matrix}{Layer.with_composition}
+\pycode{xrf_matrix}{Layer.with_thickness}
+\pycode{xrf_matrix}{Layer.__repr__}
+
+\api[\texttt{Stack}]{\texttt{Stack(layers)}}
+Ordered layers, surface first; only the last may be bulk (\fn{ValueError} otherwise). Supports
+\fn{len}, indexing, iteration, and \fn{replace(index, layer)}, which returns a new stack.
+\pycode{xrf_matrix}{Stack}
+\pycode{xrf_matrix}{Stack.__init__}
+\pycode{xrf_matrix}{Stack.__len__}
+\pycode{xrf_matrix}{Stack.__getitem__}
+\pycode{xrf_matrix}{Stack.__iter__}
+\pycode{xrf_matrix}{Stack.replace}
+\pycode{xrf_matrix}{Stack.__repr__}
+
+\subsection{Depth integrals}
+
+\api[\texttt{\_F}, \texttt{\_dF}]{\texttt{\_F(c, M)}, \texttt{\_dF(c, M)}}
+$F(c;M) = (1-\e^{-cM})/c$ computed as \fn{-expm1(-cM)/c}, which keeps full precision for
+$cM \ll 1$ (thin layers), and $1/c$ for $M=\infty$; \fn{_dF} is its derivative with respect
+to $c$, $[cM\e^{-cM}-(1-\e^{-cM})]/c^2$ ($-1/c^2$ for bulk), used in the limits of
+Eq.~\eqref{eq:D}.
+\pycode{xrf_matrix}{_F}
+\pycode{xrf_matrix}{_dF}
+
+\api[\texttt{\_G}]{\texttt{\_G(x, y, M)}}
+$G(x,y;M) = \e^{-\min(x,y)M}\,(1-\e^{-|x-y|M})/|x-y|$, a form that never evaluates the
+exponential of a large positive number, with the limit $M\,\e^{-xM}$ for $x=y$.
+\pycode{xrf_matrix}{_G}
+
+\api[\texttt{\_D}]{\texttt{\_D(a, b, k, M, rtol=1e-4)}}
+Eq.~\eqref{eq:D}, broadcasting over arrays (energies $\times$ direction cosines), switching to
+the derivative form when $|b-\kappa|$ or $|a-\kappa|$ is within \fn{rtol} of their sum.
+\pycode{xrf_matrix}{_D}
+
+\subsection{\texttt{MatrixModel}}
+
+\api{\texttt{\_Exciter}}
+An exciting line: layer index, element, line name, energy (keV), mass fraction, its
+cross-section $Q_j(E)$ on the secondary-fluorescence grid, and $\mu_c(E_j)$ in every layer.
+\pycode{xrf_matrix}{_Exciter}
+
+\api[\texttt{MatrixModel}]{\texttt{MatrixModel(sample, geometry, energy\_kev, flux\_01bw, secondary=True, target=None, sf\_step\_kev=0.04, n\_u=160, exciter\_min\_rel=1e-3)}}
+Primary and secondary sensitivities of every line in a layer stack, for one incident
+spectrum and geometry.
+\begin{args}
+\item[sample] a \fn{Layer} (one-layer stack) or a \fn{Stack}.
+\item[geometry] a \fn{Geometry}.
+\item[energy\_kev, flux\_01bw] incident spectrum per 0.1\,\% bandwidth, as returned by
+  \fn{Beamline.spectrum} or \fn{monochromatic_spectrum}; converted to per keV internally. A
+  uniform grid with $\sim$10\,eV steps is appropriate for a white beam.
+\item[secondary] include secondary fluorescence.
+\item[target] index of the layer being quantified (required for a multilayer); per-layer
+  quantities default to it, and elements absent from the stack are treated as if in it.
+\item[sf\_step\_kev] step of the decimated grid for the secondary term (default 40\,eV).
+\item[n\_u] points of the logarithmic direction-cosine grid ($u$ from $10^{-7}$ to 1).
+\item[exciter\_min\_rel] relative threshold for exciting lines.
+\end{args}
+The constructor precomputes $\mu_k(E)$ of every layer on the grid, the decimated grids and
+the incident transmissions $T_\mathrm{in}^k(E)$.
+\pycode{xrf_matrix}{MatrixModel}
+\pycode{xrf_matrix}{MatrixModel.__init__}
+
+\api[\texttt{layer}, \texttt{with\_layer}, \texttt{with\_stack}]{\texttt{layer} (property), \texttt{with\_layer(layer, index=None)}, \texttt{with\_stack(stack, target=None)}}
+The target layer, and copies of the model with one layer or the whole stack replaced (same
+beam, geometry, numerics and target). Used by the self-consistent quantification.
+\pycode{xrf_matrix}{MatrixModel.layer}
+\pycode{xrf_matrix}{MatrixModel.with_layer}
+\pycode{xrf_matrix}{MatrixModel.with_stack}
+
+\api[\texttt{exciters}]{\texttt{exciters} (property)}
+The lines of the stack's elements that can drive secondary fluorescence, computed once: for
+each element of each layer, every line above 1\,keV, ranked by its primary production at the
+top of its layer, $\int\Phi\,Q_j\,T_\mathrm{in}^a\,\dd E/\sin\psi_\mathrm{in}$; lines below
+\fn{exciter_min_rel} of the strongest line of that element are dropped.
+\pycode{xrf_matrix}{MatrixModel.exciters}
+
+\api[\texttt{\_k}, \texttt{\_b}, \texttt{\_tout}]{\texttt{\_k(layer)}, \texttt{\_b(line\_energy\_kev)}, \texttt{\_tout(b, k)}}
+Helpers: the layer index (target by default); the exit attenuation $b_c = \mu_c(E_l)/
+\sin\psi_\mathrm{out}$ of every layer; and $T_\mathrm{out}^k$.
+\pycode{xrf_matrix}{MatrixModel._k}
+\pycode{xrf_matrix}{MatrixModel._b}
+\pycode{xrf_matrix}{MatrixModel._tout}
+
+\api[\texttt{primary}]{\texttt{primary(z, macro, line\_energy\_kev, layer=None)}}
+Eq.~\eqref{eq:primary}, integrated with the trapezoidal rule on the full grid. Returns 0 if
+the line cannot be excited by the spectrum.
+\pycode{xrf_matrix}{MatrixModel.primary}
+
+\api[\texttt{secondary}]{\texttt{secondary(z, macro, line\_energy\_kev, layer=None, by\_exciter=False)}}
+Eq.~\eqref{eq:secondary}: for each exciter able to excite the line
+($Q_{il}(E_j) > 0$), the kernel is computed on the (energy, $u$) grid, integrated over
+$\ln u$, then over energy. With \fn{by_exciter=True} it also returns the contribution of each
+exciter, keyed \fn{"<layer>:<element> <line>"}---useful to see which element drives the
+enhancement.
+\pycode{xrf_matrix}{MatrixModel.secondary}
+
+\api{\texttt{sensitivity}, \texttt{emission}, \texttt{enhancement}, \texttt{absorption\_factor}}
+\fn{sensitivity} is $P^k + S^k$ per unit mass fraction in layer $k$. \fn{emission} is the
+intensity from the whole stack, $\sum_k w_i^k(P^k [+S^k])$; it is what sets relative
+intensities \emph{within} a line group in \fn{xrf_fit} (elements absent from the stack are
+evaluated per unit mass fraction in the target). \fn{enhancement} is $S/P$.
+\fn{absorption_factor} is $P^k$ divided by the absorption-free value $M_k\int\Phi
+Q\,\dd E/\sin\psi_\mathrm{in}$ (thin film, no overlayer): 1 means no absorption; NaN for a
+bulk layer.
+\pycode{xrf_matrix}{MatrixModel.sensitivity}
+\pycode{xrf_matrix}{MatrixModel.emission}
+\pycode{xrf_matrix}{MatrixModel.enhancement}
+\pycode{xrf_matrix}{MatrixModel.absorption_factor}
+
+\subsection{Quantification}
+
+\api[\texttt{\_line}]{\texttt{\_line(group)}}
+\fn{(Z, macro, energy in keV)} of a group's reference line; merged lines (\fn{"KL3+1"}) are
+refused, since their cross-section is not defined.
+\pycode{xrf_matrix}{_line}
+
+\api[\texttt{quantify\_layer}]{\texttt{quantify\_layer(areas, groups, matrix, detector, reference, analytes, fixed\_atoms=None, max\_iter=50, tol=1e-6)}}
+Self-consistent composition of the target layer from fitted reference-line areas.
+\begin{args}
+\item[areas] \texttt{\{label: reference-line area\}}, e.g. \fn{FitResult.areas}.
+\item[groups] \texttt{\{label: LineGroup\}}.
+\item[matrix] a \fn{MatrixModel}; its target layer gives the starting composition.
+\item[detector] an \fn{xrf_fit.Detector} (detection efficiency).
+\item[reference] label of the reference group (\fn{"As K"}).
+\item[analytes] labels of the groups to quantify.
+\item[fixed\_atoms] \texttt{\{symbol: atoms per reference atom\}} for unmeasured elements of the
+  layer (e.g. oxygen).
+\item[max\_iter, tol] iteration limit and convergence threshold on the atom ratios.
+\end{args}
+\blk{Method} For each group $g$ the measured area is modelled as
+\begin{equation}
+  A_g \propto w_g^t s_g^t + C_g, \qquad s_g^k = (P^k+S^k)\,\epsilon, \qquad
+  C_g = \sum_{k\neq t} w_g^k s_g^k ,
+\end{equation}
+where $t$ is the target layer and $C_g$ the known contribution of the other layers (caps,
+substrate). Relative to the reference group $r$,
+\begin{equation}
+  w_i^t = \frac{(A_i/A_r)\,(w_r^t s_r^t + C_r) - C_i}{s_i^t} .
+\end{equation}
+The atom ratios $n_i/n_r = (w_i^t/W_i)/(w_r^t/W_r)$ ($W$: atomic weights) rebuild the target
+composition, the sensitivities are recomputed, and the loop stops when no ratio changes by
+more than \fn{tol}. Density and thicknesses are held fixed. Elements of the target that are
+neither analytes, reference nor fixed are dropped, because the absolute mass fraction of the
+reference matters once other layers contribute. A negative $w_i$ (the other layers explain
+more than the measured intensity) is clipped to 0 with a warning. For a one-layer sample
+$C=0$ and the result is $n_i/n_r = (A_i/A_r)(s_r W_r)/(s_i W_i)$, the formula of
+\fn{xrf_fit.number_ratio} with matrix-corrected sensitivities.
+\blk{Returns} a dictionary: \fn{ratios} (atoms per reference atom), the converged
+\fn{layer} and \fn{matrix}, \fn{k} (the factors $(n_i/n_r)/(A_i/A_r)$), \fn{enhancement} and
+\fn{absorption} of the reference lines, \fn{other_layers} (fraction of each modelled
+intensity coming from the other layers), \fn{terms} ($s^t$, $C$), \fn{iterations},
+\fn{history}, \fn{reference}.
+\pycode{xrf_matrix}{quantify_layer}
+
+\api[\texttt{atom\_ratio}]{\texttt{atom\_ratio(quant, label, area, area\_ref, err=None, err\_ref=None)}}
+Applies the converged sensitivities of \fn{quantify_layer} to other areas---typically every
+pixel of a map---with the matrix held fixed:
+$n_i/n_r = [(R\,I_r - C_i)/s_i/W_i]/(w_r/W_r)$, $R = A_i/A_r$, $I_r = w_r s_r + C_r$. Errors of
+the two areas are propagated as uncorrelated. Returns \fn{(ratio, error)}.
+\pycode{xrf_matrix}{atom_ratio}
+\pycode{xrf_matrix}{_label_symbol}
+\pycode{xrf_matrix}{_ref_symbol}
