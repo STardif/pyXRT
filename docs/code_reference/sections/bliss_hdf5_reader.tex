@@ -1,0 +1,347 @@
+%==========================================================================================
+\section{\texttt{bliss\_hdf5\_reader}: reading BLISS scans}\label{sec:bliss}
+%==========================================================================================
+
+\subsection{Overview}
+
+BLISS, the ESRF beamline control system, writes one HDF5 \emph{master file} per dataset,
+organised along NeXus conventions \citep{Konnecke2015}. Every scan is an entry named
+\fn{"<number>.<subscan>"} (\fn{"12.1"}) containing:
+\begin{itemize}[nosep]
+\item \fn{title}: the command as typed (\fn{"amesh xech 0 1 50 yech 0 1 40 0.1"}),
+  \fn{start_time}, \fn{end_time}, \fn{end_reason} (\fn{SUCCESS}, \fn{USER_ABORT}, \dots);
+\item \fn{measurement/}: one dataset per recorded quantity, one entry per scan point along
+  the first axis (scalar counters and motor positions: shape $(n)$; MCA spectra:
+  $(n, n_\mathrm{ch})$; detector images: $(n, h, w)$). These are links to the
+  \fn{instrument/} group;
+\item \fn{instrument/positioners_start}: every motor position at the start of the scan;
+  \fn{instrument/<name>} groups with an \fn{NX_class} attribute (\fn{NXpositioner} for motors);
+\item \fn{scan_parameters/}: \fn{npoints}, \fn{count_time} and other parameters, when recorded;
+\item \fn{writer/status}, \fn{sample/name}.
+\end{itemize}
+Detector images are written by Lima in separate files of a \fn{scanNNNN/} folder next to the
+master file; the master file exposes them as an HDF5 \emph{virtual dataset}, which maps
+ranges of the virtual array onto datasets of the source files.
+
+The module turns this into a \fn{BlissScan} object that knows the \emph{geometry} of the scan
+(its shape in acquisition order, the motor driving each dimension, back-and-forth rows,
+aborted points) and reads the data on demand. The geometry comes from parsing the command in
+the title when it is recognised (Table~\ref{tab:bliss-titles}), and otherwise from the
+recorded motor positions, so that scans run through user macros with custom titles are
+still read correctly.
+
+\begin{table}[h]
+\centering\small
+\caption{Scan commands recognised in titles, and the resulting shape (slowest axis first).}
+\label{tab:bliss-titles}
+\begin{tabularx}{\textwidth}{@{}l X l@{}}
+\toprule
+Command & Title grammar & Shape \\
+\midrule
+\fn{ascan dscan a2scan d3scan lineup} & $(\text{motor}\ \text{start}\ \text{stop})\times N$,
+intervals, count time & $(\text{intervals}+1,)$ \\
+\fn{amesh dmesh} & fast motor start stop intervals, slow motor start stop intervals, time
+(the \emph{first} motor is the fast one) & $(n_\mathrm{slow}, n_\mathrm{fast})$ \\
+\fn{fscan fscan2d fscan3d} & $(\text{motor}\ \text{start}\ \text{step}\ \text{npoints})\times
+d$, acquisition time [period] (the \emph{last} motor is the fast one) & $(n_0,\dots,n_{d-1})$ \\
+\texttt{f2scan f3scan \dots} & $(\text{motor}\ \text{start}\ \text{step})\times N$, npoints,
+time & $(n,)$ \\
+\fn{loopscan} & npoints, time & $(n,)$ \\
+\fn{timescan ftimescan} & time [npoints] (0 or absent: until stopped) & $(n,)$ \\
+\fn{ct sct} & [time] & $()$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{hyp}
+\begin{itemize}[nosep,leftmargin=1em]
+\item Data are stored in acquisition order, one entry per point along the first axis.
+  Meshes are row-major with the slow motor first.
+\item The number of recorded points is the most common first-axis length of the measurement
+  datasets (fast scans add ``\fn{*_raw}'' channels with $2n+1$ entries, which are ignored).
+\item A mesh scanned back and forth (snake) is recognised when the second row of the fast
+  motor matches the reversed first row better than the first row itself.
+\item An aborted 1D scan keeps its recorded length; an aborted mesh keeps its planned shape
+  and missing points are NaN in gridded data.
+\item Frames are read through the master file's virtual dataset; when there is none, the
+  image files are found by listing the scan folder (top level only).
+\end{itemize}
+\end{hyp}
+
+\subsection{Module header and helpers}
+
+\pycode{bliss_hdf5_reader}{_header}
+
+The constants list the positioner names that are time axes, not motors (\fn{TIME_AXES}),
+the commands without a motor (\fn{TIME_SCANS}) and the single-point commands.
+
+\api[\texttt{\_open}]{\texttt{\_open(path)}}
+Opens a file read-only with HDF5 file locking disabled (\fn{locking=False}), so that a file
+that BLISS is still writing can be read at the beamline; falls back to the default for
+h5py older than 3.5, which has no \fn{locking} argument. Returns an \fn{h5py.File}, to be
+used as a context manager.
+\pycode{bliss_hdf5_reader}{_open}
+
+\api[\texttt{\_to\_str}, \texttt{\_read\_scalar}, \texttt{\_is\_number}]{\texttt{\_to\_str(value)}, \texttt{\_read\_scalar(group, name)}, \texttt{\_is\_number(token)}}
+\fn{_to_str} decodes bytes (UTF-8, with replacement of invalid sequences) and zero-dimensional
+arrays to a Python string. \fn{_read_scalar} returns \fn{group[name]} as a Python scalar or
+string, or \fn{None} if the dataset is missing. \fn{_is_number} tells whether a title token
+parses as a float.
+\pycode{bliss_hdf5_reader}{_to_str}
+\pycode{bliss_hdf5_reader}{_read_scalar}
+\pycode{bliss_hdf5_reader}{_is_number}
+
+\api[\texttt{\_parse\_key}]{\texttt{\_parse\_key(scan, subscan)}}
+Accepts a scan given as an integer (\fn{12}), a string (\fn{"12"}) or a full entry key
+(\fn{"12.2"}). Returns \fn{(number, subscan, key)}; the subscan of a full key takes
+precedence over the \fn{subscan} argument.
+\pycode{bliss_hdf5_reader}{_parse_key}
+
+\api[\texttt{list\_scans}]{\texttt{list\_scans(h5\_filepath)}}
+Lists the scans of a master file without reading any data.
+\blk{Returns} a list of dictionaries, one per top-level group, with keys \fn{key},
+\fn{number} (integer part of the key, or \fn{None}), \fn{title}, \fn{npoints} (planned, from
+\fn{scan_parameters}, if recorded), \fn{end_reason} and \fn{start_time}, sorted numerically by
+scan then subscan (so \fn{"10.1"} comes after \fn{"9.1"}).
+\pycode{bliss_hdf5_reader}{list_scans}
+
+\api{\texttt{ScanMotor}}
+A motor driven by the scan: \fn{name}, \fn{dim} (the scan dimension it drives, 0 = slowest),
+\fn{npoints} along that dimension, \fn{start} and \fn{stop} as written in the title
+(relative to the current position for d-scans, flagged by \fn{relative}). Its \fn{step}
+property is $(\text{stop}-\text{start})/(n-1)$, or \fn{None} when undefined. Several motors can
+share a dimension (\fn{a2scan}, the slow motors of an inferred mesh).
+\pycode{bliss_hdf5_reader}{ScanMotor}
+\pycode{bliss_hdf5_reader}{ScanMotor.step}
+
+\api{\texttt{FrameSource}}
+Location of one detector frame on disk: the source \fn{file}, the internal \fn{dataset}
+path, and the frame \fn{index} in that dataset. Produced by \fn{BlissScan.frame_sources}.
+\pycode{bliss_hdf5_reader}{FrameSource}
+
+\subsection{Title parsers}
+
+Each parser receives the command and the list of title tokens (commas are treated as
+spaces) and returns \fn{(shape, motors, count_time)}, or \fn{None} if the tokens do not
+follow the expected grammar---in which case the geometry is inferred from the data.
+
+\api[\texttt{\_parse\_step\_scan}]{\texttt{\_parse\_step\_scan(cmd, args)}}
+Step scans with $N$ motors: $3N+2$ tokens, each triple a motor name and two numbers, then an
+integer number of intervals and a count time. The number of points is intervals $+1$.
+Commands starting with \fn{d}, and \fn{lineup}, are relative.
+\pycode{bliss_hdf5_reader}{_parse_step_scan}
+
+\api[\texttt{\_parse\_mesh}]{\texttt{\_parse\_mesh(cmd, args)}}
+\fn{amesh}/\fn{dmesh}: the first motor is the fast one, but the returned shape and motor
+list put the slow motor first, so that every 2D scan has shape $(n_\mathrm{slow},
+n_\mathrm{fast})$ whatever the command.
+\pycode{bliss_hdf5_reader}{_parse_mesh}
+
+\api[\texttt{\_parse\_fscan\_nd}]{\texttt{\_parse\_fscan\_nd(cmd, args)}}
+Continuous scans \fn{fscan}, \fn{fscan2d}, \fn{fscan3d}: $d$ groups of (motor, start, step,
+npoints), the \emph{last} motor being the fast one; the stop position is $\text{start} +
+\text{step}\,(n-1)$.
+\pycode{bliss_hdf5_reader}{_parse_fscan_nd}
+
+\api[\texttt{\_parse\_fnscan}]{\texttt{\_parse\_fnscan(cmd, args)}}
+Continuous scans of several motors along one dimension (\fn{f2scan}, \fn{f3scan}): the
+number of motors is read from the command name.
+\pycode{bliss_hdf5_reader}{_parse_fnscan}
+
+\api[\texttt{\_parse\_time\_scan}, \texttt{\_parse\_single\_point}]{\texttt{\_parse\_time\_scan(cmd, args)}, \texttt{\_parse\_single\_point(cmd, args)}}
+Scans without motors. A \fn{timescan} without a number of points runs until it is stopped:
+its planned size is unknown (shape $(0,)$ at this stage, replaced by the recorded length).
+\fn{ct}/\fn{sct} have shape $()$.
+\pycode{bliss_hdf5_reader}{_parse_time_scan}
+\pycode{bliss_hdf5_reader}{_parse_single_point}
+
+\api[\texttt{\_parse\_title}]{\texttt{\_parse\_title(title)}}
+Dispatches on the first token with regular expressions (\texttt{[ad]\textbackslash d*scan\textbar{}lineup},
+\texttt{f\textbackslash d+scan}) and the command tables. Returns \fn{(command, parsed)} with \fn{parsed}
+\fn{None} for unknown commands.
+\pycode{bliss_hdf5_reader}{_parse_title}
+
+\subsection{\texttt{BlissScan}}
+
+\api[\texttt{BlissScan}]{\texttt{BlissScan(h5\_filepath, scan\_number, subscan=1, image\_prefix="eiger", image\_suffix=".h5", verbose=False)}}
+One scan of a master file, of any type. Instantiation reads only metadata; data are read on
+demand.
+\begin{args}
+\item[h5\_filepath] path of the master file.
+\item[scan\_number] integer, or full key \fn{"12.1"}.
+\item[subscan] used when \fn{scan_number} is an integer (default 1).
+\item[image\_prefix] preferred image detector: the first image dataset whose name starts
+  with it (default \fn{"eiger"}); \fn{None} takes the first image detector.
+\item[image\_suffix] extension of image files when they have to be found by listing the
+  scan folder.
+\item[verbose] print the summary after \fn{read_data()}.
+\end{args}
+\blk{Main attributes} \fn{title}, \fn{command} (and its former name \fn{scan_type}),
+\fn{shape}, \fn{motors} (list of \fn{ScanMotor}), \fn{npoints} (recorded),
+\fn{npoints_planned}, \fn{count_time}, \fn{snake}, \fn{geometry_source} (\fn{"title"} or
+\fn{"data"}), \fn{start_time}, \fn{end_time}, \fn{end_reason}, \fn{writer_status},
+\fn{sample_name}, \fn{scan_folder}; after \fn{read_data()}: \fn{counters} (raw arrays),
+\fn{grids} (scalar counters on the scan grid), \fn{image_path_list}, \fn{nb_images},
+\fn{nb_frames}.
+\pycode{bliss_hdf5_reader}{BlissScan}
+\pycode{bliss_hdf5_reader}{BlissScan.__init__}
+
+\api[\texttt{BlissScan.\_read\_metadata}]{\texttt{BlissScan.\_read\_metadata()}}
+The core of the reader. It opens the file once and reads the entry's scalars, the shapes and
+types of every measurement dataset (not the data), the positioner names
+(\fn{_find_positioners}), the number of recorded points (\fn{_count_acquired_points}) and the
+positions of every positioner recorded once per point (kept in a cache for geometry
+inference and snake detection). It then:
+\begin{enumerate}[nosep]
+\item parses the title; if that fails, infers the geometry from the motor positions;
+\item takes the count time from \fn{scan_parameters}, else from the title;
+\item determines the planned number of points: the product of the title shape, overridden
+  by \fn{scan_parameters/npoints} if they disagree (with a warning);
+\item for 0D and 1D scans, replaces the shape by what was recorded;
+\item detects back-and-forth meshes.
+\end{enumerate}
+Raises \fn{FileNotFoundError} or \fn{KeyError} if the file or the scan does not exist.
+\pycode{bliss_hdf5_reader}{BlissScan._read_metadata}
+
+\api[\texttt{BlissScan.\_find\_positioners}]{\texttt{BlissScan.\_find\_positioners(entry, meas)} (static)}
+Motors among the measurement datasets: names present in \fn{positioners_start}, and datasets
+whose link target is an \fn{instrument/} group of class \fn{NXpositioner}. The second rule
+catches the fast motor of continuous scans, recorded as an encoder channel. Time axes are
+excluded.
+\pycode{bliss_hdf5_reader}{BlissScan._find_positioners}
+
+\api[\texttt{BlissScan.\_count\_acquired\_points}]{\texttt{BlissScan.\_count\_acquired\_points(npts\_param)}}
+The number of recorded points is the most common first-dimension length among the
+measurement datasets (ties broken towards the larger value). Lengths above the planned number
+of points are discarded first, which removes the $2n+1$ ``\fn{*_raw}'' channels of fast
+scans.
+\pycode{bliss_hdf5_reader}{BlissScan._count_acquired_points}
+
+\api[\texttt{BlissScan.\_infer\_geometry}]{\texttt{BlissScan.\_infer\_geometry(npts\_planned=None)}}
+Geometry for unrecognised titles. Motors that do not move (peak-to-peak range below
+$10^{-9}$ of their magnitude) are ignored. If the moving motors form a mesh
+(\fn{_infer_mesh}), the shape is $(n_\mathrm{slow}, n_\mathrm{fast})$, extended to the planned
+number of rows for an aborted mesh; otherwise the scan is 1D and every moving motor drives
+dimension 0.
+\pycode{bliss_hdf5_reader}{BlissScan._infer_geometry}
+
+\api[\texttt{BlissScan.\_row\_length}]{\texttt{BlissScan.\_row\_length(pos)} (static)}
+Tests whether a position series is the slow motor of a mesh: it must jump at regular
+intervals (one jump per row, all rows of equal length, at least two full rows) and stay
+constant within a row (range within a row below a tenth of the median jump). Returns the row
+length or \fn{None}.
+\pycode{bliss_hdf5_reader}{BlissScan._row_length}
+
+\api[\texttt{BlissScan.\_infer\_mesh}]{\texttt{BlissScan.\_infer\_mesh(moving)} (class method)}
+For each candidate row length (shortest first), the slow motors are those with that row
+length, and the fast motors those that repeat the same positions on the second row as on
+the first, in the same or the reversed order (mismatch below a tenth of their range).
+Returns \fn{((n_slow, n_fast), motors)} or \fn{None}.
+\pycode{bliss_hdf5_reader}{BlissScan._infer_mesh}
+
+\api[\texttt{BlissScan.\_detect\_snake}]{\texttt{BlissScan.\_detect\_snake()}}
+A 2D scan is back-and-forth if the second row of the fast motor is closer to the reversed
+first row than to the first row itself.
+\pycode{bliss_hdf5_reader}{BlissScan._detect_snake}
+
+\api[Properties: \texttt{ndim}, \texttt{is\_complete}, \texttt{motor\_names}, \texttt{positioner\_names}; \texttt{motors\_of\_dim}]{Properties: \texttt{ndim}, \texttt{is\_complete}, \texttt{motor\_names}, \texttt{positioner\_names}; \texttt{motors\_of\_dim(dim)}}
+\fn{is_complete} is \fn{end_reason == "SUCCESS"} when the end reason is recorded, otherwise
+a comparison of recorded and planned points. \fn{positioner_names} lists every motor
+recorded at each point, scanned or not.
+\pycode{bliss_hdf5_reader}{BlissScan.ndim}
+\pycode{bliss_hdf5_reader}{BlissScan.is_complete}
+\pycode{bliss_hdf5_reader}{BlissScan.motor_names}
+\pycode{bliss_hdf5_reader}{BlissScan.positioner_names}
+\pycode{bliss_hdf5_reader}{BlissScan.motors_of_dim}
+
+\api[\texttt{BlissScan.index\_grid}]{\texttt{BlissScan.index\_grid} (property)}
+The flat point index at each grid position, $-1$ where no point was recorded; odd rows are
+reversed for a back-and-forth mesh. It is the single object that places per-point data on
+the grid, used by \fn{to_grid} and by the image scripts.
+\pycode{bliss_hdf5_reader}{BlissScan.index_grid}
+
+\api[\texttt{get\_available\_counters}, \texttt{get}, \texttt{\_\_getitem\_\_}, \texttt{positions}]{\texttt{get\_available\_counters()} (alias \texttt{list\_counters}), \texttt{get(name, grid=False)}, \texttt{\_\_getitem\_\_(name)}, \texttt{positions(motor, grid=False)}}
+\fn{get_available_counters} returns \texttt{\{name: \{"shape", "dtype"\}\}} for every
+measurement dataset without reading data. \fn{get} reads one dataset (or returns it from
+\fn{counters} if \fn{read_data} loaded it), warns when it would load more than 2\,GB, and
+with \fn{grid=True} reshapes the point axis to the scan shape: an MCA dataset of a mesh
+becomes $(n_\mathrm{slow}, n_\mathrm{fast}, n_\mathrm{ch})$. \fn{scan["name"]} is
+\fn{get(name, grid=True)}; \fn{positions} returns floats.
+\pycode{bliss_hdf5_reader}{BlissScan.get_available_counters}
+\pycode{bliss_hdf5_reader}{BlissScan.get}
+\pycode{bliss_hdf5_reader}{BlissScan.__getitem__}
+\pycode{bliss_hdf5_reader}{BlissScan.positions}
+
+\api[\texttt{BlissScan.to\_grid}]{\texttt{BlissScan.to\_grid(data, name="array")}}
+Places per-point data on the scan grid. Complete, non-snake data are simply reshaped. With
+missing points (aborted mesh) the output is filled with NaN (integer data are promoted to
+floating point for that) and the recorded points are placed through \fn{index_grid}, which
+also un-snakes back-and-forth rows. A counter with one value more than the grid (BLISS
+sometimes records one point ahead on abort) is truncated. Raises \fn{ValueError} when the
+first axis is not one value per point.
+\pycode{bliss_hdf5_reader}{BlissScan.to_grid}
+
+\api[\texttt{BlissScan.read\_data}]{\texttt{BlissScan.read\_data(extra\_counters=None)}}
+Loads the scanned motors and the requested counters into \fn{counters}, grids every 1D
+counter into \fn{grids}, and locates the image files (\fn{_process_images}). Missing names
+produce warnings, not errors.
+\pycode{bliss_hdf5_reader}{BlissScan.read_data}
+
+\subsection{Detector frames}
+
+\api[\texttt{image\_detectors}, \texttt{spectrum\_detectors} ; \texttt{\_pick\_detector}]{\texttt{image\_detectors}, \texttt{spectrum\_detectors} (properties); \texttt{\_pick\_detector(detector)}}
+Datasets with one 2D image per point (3D datasets) and with one spectrum per point (2D
+datasets). \fn{_pick_detector} returns the named detector, or the first image detector
+matching \fn{image_prefix}, or the first image detector.
+\pycode{bliss_hdf5_reader}{BlissScan.image_detectors}
+\pycode{bliss_hdf5_reader}{BlissScan.spectrum_detectors}
+\pycode{bliss_hdf5_reader}{BlissScan._pick_detector}
+
+\api[\texttt{BlissScan.frame\_sources}]{\texttt{BlissScan.frame\_sources(detector=None)}}
+Reads the mapping of the virtual dataset: for each virtual source, the selection bounds in
+the virtual and source spaces give the range of frames it holds; relative file names are
+resolved against the master file's folder. Returns one \fn{FrameSource} per frame, or an
+empty list when the detector is not a virtual dataset.
+\pycode{bliss_hdf5_reader}{BlissScan.frame_sources}
+
+\api[\texttt{read\_frame}, \texttt{iter\_frames}]{\texttt{read\_frame(index, detector=None, roi=None)}, \texttt{iter\_frames(detector=None, indices=None, roi=None)}}
+One frame by point index, read through the master file (HDF5 resolves the virtual mapping),
+optionally restricted to \fn{roi = (row slice, column slice)} so that only that part is read
+from disk. \fn{iter_frames} yields frames while keeping the file open, which is much faster
+than repeated \fn{read_frame} calls.
+\pycode{bliss_hdf5_reader}{BlissScan.read_frame}
+\pycode{bliss_hdf5_reader}{BlissScan.iter_frames}
+
+\api[\texttt{BlissScan.\_process\_images}]{\texttt{BlissScan.\_process\_images()}}
+Fills \fn{image_path_list} with the distinct image files in acquisition order (from the
+virtual dataset, or by listing \fn{scanNNNN/<prefix>*<suffix>}), \fn{nb_images} (files) and
+\fn{nb_frames} (frames).
+\pycode{bliss_hdf5_reader}{BlissScan._process_images}
+
+\subsection{Other methods, the mesh subclass and the command line}
+
+\api[\texttt{positioners\_start}, \texttt{get\_relative\_position\_grid}, \texttt{summary}, \texttt{get\_summary}, \texttt{\_\_repr\_\_}]{\texttt{positioners\_start()}, \texttt{get\_relative\_position\_grid(motor\_name, scale=1000.0)}, \texttt{summary()}, \texttt{get\_summary()}, \texttt{\_\_repr\_\_()}}
+\fn{positioners_start} returns the snapshot of every motor at the start of the scan.
+\fn{get_relative_position_grid} returns the gridded positions minus that of the first
+recorded point, times \fn{scale} (mm to \textmu m by default). \fn{summary} is a
+human-readable description: shape and its source, points recorded and planned, completion,
+snake, count time, motors with their ranges and steps, detectors, loaded counters.
+\pycode{bliss_hdf5_reader}{BlissScan.positioners_start}
+\pycode{bliss_hdf5_reader}{BlissScan.get_relative_position_grid}
+\pycode{bliss_hdf5_reader}{BlissScan.summary}
+\pycode{bliss_hdf5_reader}{BlissScan.get_summary}
+\pycode{bliss_hdf5_reader}{BlissScan.__repr__}
+
+\api{\texttt{BlissMeshScan}}
+A \fn{BlissScan} that must be two-dimensional (\fn{ValueError} otherwise), kept for scripts
+written for the former mesh-only reader. It adds the attributes \fn{slow_/fast_motor_name},
+\fn{_start}, \fn{_stop}, \fn{_steps}, \fn{_intervals}, \fn{_step_size}, \fn{scan_shape} and
+\fn{expected_points}.
+\pycode{bliss_hdf5_reader}{BlissMeshScan}
+\pycode{bliss_hdf5_reader}{BlissMeshScan._read_metadata}
+
+\api[\texttt{main}]{\texttt{main()}}
+Command line: \fn{python bliss_hdf5_reader.py file.h5} lists the scans (key, planned
+points, end reason, title); with scan keys after the file name it prints their summaries and
+dataset shapes.
+\pycode{bliss_hdf5_reader}{main}

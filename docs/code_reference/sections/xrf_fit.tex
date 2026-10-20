@@ -1,0 +1,811 @@
+%==========================================================================================
+\section{\texttt{xrf\_fit}: the spectrum model and the fits}\label{sec:fit}
+%==========================================================================================
+
+\subsection{Overview: the constrained model}
+
+An energy-dispersive XRF spectrum is a sum of peaks on a continuum. Fitting every peak with
+free position, width and height is unstable as soon as peaks overlap, and produces numbers
+that cannot be compared between elements. \fn{xrf_fit} instead builds a \emph{constrained}
+model in which almost everything except one amplitude per element and shell is computed:
+\begin{equation}
+  y(c) = B(c) + \sum_g A_g \sum_{l\in g} r_l\,\tau_l(d)
+  \Big[\big(1-\textstyle\sum_e f_{le}\big)\,R\big(c-c_l;\sigma_l\big)
+       + \sum_e f_{le}\,R\big(c-c_{le};\sigma_{le}\big)\Big]
+  + Y_\mathrm{scatter}(c) + \tau_\mathrm{pp}\,P(c),
+  \label{eq:model}
+\end{equation}
+where
+\begin{itemize}[nosep]
+\item $c$ is the MCA channel, and $E(c) = Gc+O$ the energy calibration;
+\item $B(c)$ is a polynomial background (or the exponential of a polynomial);
+\item $g$ runs over \emph{line groups}, one per (element, shell family): \fn{"Cu K"},
+  \fn{"Pb L"}, \fn{"Pb M"};
+\item $A_g$, the only free amplitude of the group, is the integrated number of counts of its
+  most intense line (the \emph{reference line});
+\item $r_l$ is the intensity of line $l$ relative to the reference line ($r=1$ for it),
+  computed for the excitation, the detector and, optionally, the sample matrix;
+\item $\tau_l(d)$ rescales $r_l$ when the sample--detector air path $d$ is fitted;
+\item $c_l = (E_l-O)/G$ is the position of the line, from its tabulated energy; $\sigma_l$ its
+  Gaussian width from the detector resolution law;
+\item $f_{le}$ and $c_{le}$ are the fraction and position of its sensor escape peaks;
+\item $R$ is the unit-area detector response (Gaussian or Voigt, optionally with a
+  low-energy tail and a step);
+\item $Y_\mathrm{scatter}$ holds the elastic and Compton peaks under monochromatic
+  excitation, and $\tau_\mathrm{pp}P(c)$ the pile-up spectrum.
+\end{itemize}
+An $N$-element fit has $N$ amplitudes plus a handful of shared parameters, instead of several
+per peak. Peak positions are never free individually: they move only through the
+calibration. This is the approach of the fundamental-parameter fitting codes such as PyMca
+\citep{Sole2007}, written here for white-beam excitation and for maps.
+
+The module also provides the statistical treatment of map data (normalisation, averaging,
+uncertainties), the per-pixel linear solve that turns the average-spectrum fit into maps with
+error maps, the tracking of detector-resolution changes during a scan, and diagnostic plots.
+
+\pycode{xrf_fit}{_header}
+
+\subsection{Energy calibration}
+
+\api[\texttt{Calibration}]{\texttt{Calibration(gain=10.032, offset=-31.263)}}
+Linear calibration $E\,[\mathrm{eV}] = G\,c + O$ (a frozen dataclass). The defaults were
+measured on Ga/As K lines with the BM32 XIA configuration of 2026; \fn{xrf_calibration}
+measures it on reference samples.
+\begin{args}
+\item[gain] $G$, eV per channel.
+\item[offset] $O$, energy of channel 0 in eV.
+\end{args}
+\blk{Methods} \fn{energy(channel)} and \fn{channel(energy_ev)} (not rounded) convert in
+either direction, element-wise; \fn{channel_range(emin_ev, emax_ev, n_channels)} returns the
+half-open channel range $[\lfloor c(E_\mathrm{min})\rfloor, \lceil c(E_\mathrm{max})\rceil+1)$
+clipped to the spectrum.
+\pycode{xrf_fit}{Calibration}
+\pycode{xrf_fit}{Calibration.energy}
+\pycode{xrf_fit}{Calibration.channel}
+\pycode{xrf_fit}{Calibration.channel_range}
+
+\subsection{The detector}\label{sec:detector}
+
+\api[\texttt{Detector}]{\texttt{Detector(material="Si", noise\_ev=30.0, fano=0.12, gamma\_ev=5.0, sensor\_thickness\_um=450.0, window\_material="C", window\_density\_g\_cm3=2.2, window\_thickness\_um=1.0, air\_path\_cm=20.0, air\_temperature\_c=20.0, air\_pressure\_hpa=1013.25, dead\_layer\_um=0.0, tail\_fraction=0.0, tail\_slope=1.5, step\_fraction=0.0)}}
+The energy resolution, detection efficiency and line shape of a solid-state detector. The
+defaults describe the BM32 KETEK VITUS H7 silicon drift detector \citep{Lechner1996}: 450\,\textmu m
+of Si behind a 1\,\textmu m carbon window, about 20\,cm from the sample.
+\begin{args}
+\item[material] sensor, \fn{"Si"} or \fn{"Ge"}: sets the pair-creation energy $\varepsilon$
+  (3.85 and 2.96\,eV) and the density.
+\item[noise\_ev] electronic-noise contribution $N$ to $\sigma$.
+\item[fano] Fano factor $F$.
+\item[gamma\_ev] Lorentzian half width $\Gamma$ of the Voigt profile.
+\item[sensor\_thickness\_um] active thickness $d_s$.
+\item[window\_*] entrance-window material, density and thickness.
+\item[air\_path\_cm, air\_temperature\_c, air\_pressure\_hpa] sample--window air path and
+  ambient conditions.
+\item[dead\_layer\_um] inactive Si at the entrance.
+\item[tail\_fraction, tail\_slope, step\_fraction] line-shape parameters, see \fn{peak_shape}.
+\end{args}
+\blk{Resolution} The Gaussian width combines electronic noise and the statistics of charge
+creation \citep{Fano1947,Knoll2010}:
+\begin{equation}
+  \sigma^2(E) = N^2 + F\varepsilon E, \qquad \mathrm{FWHM} = 2\sqrt{2\ln2}\,\sigma =
+  2.3548\,\sigma .
+  \label{eq:resolution}
+\end{equation}
+The defaults ($N = 30$\,eV, $F = 0.12$) give 142\,eV FWHM at 5.9\,keV (the class docstring
+quotes ``$\sim$135\,eV'', the middle of the 125--150\,eV range of the BM32 detector; the
+resolution is fitted in practice).
+\begin{hyp}
+Only the product $F\varepsilon$ enters Eq.~\eqref{eq:resolution}. The value of $\varepsilon$
+for Si used here, 3.85\,eV, is above the measured 3.66\,eV at room temperature
+\citep{Scholze1998}; since $F$ is fitted, this only rescales the fitted Fano factor and not
+the widths. The Lorentzian width $\Gamma$ is physically the natural width of the level (a few
+eV); a fitted value above $\sim$30\,eV signals that a tail term is needed.
+\end{hyp}
+\pycode{xrf_fit}{Detector}
+
+\api[\texttt{pair\_energy\_ev}]{\texttt{pair\_energy\_ev} (property)}
+$\varepsilon$ for the sensor material; \fn{ValueError} for other materials.
+\pycode{xrf_fit}{Detector.pair_energy_ev}
+
+\api[\texttt{Detector.efficiency}]{\texttt{Detector.efficiency(energy\_ev)}}
+Probability that a photon emitted towards the detector is recorded in the full-energy
+region:
+\begin{equation}
+  \epsilon(E) = \underbrace{\e^{-\mu_\mathrm{air}(E)\rho_\mathrm{air}d_\mathrm{air}}}_{\text{air}}\;
+  \underbrace{\e^{-\mu_w(E)\rho_w t_w}}_{\text{window}}\;
+  \underbrace{\e^{-\mu_\mathrm{Si}(E)\rho_\mathrm{Si}t_\mathrm{dead}}}_{\text{dead layer}}\;
+  \underbrace{\left[1-\e^{-\tau_\mathrm{Si}(E)\rho_\mathrm{Si}d_s}\right]}_{\text{absorbed}} .
+  \label{eq:efficiency}
+\end{equation}
+Attenuation along the path uses total cross-sections (any interaction removes the photon);
+absorption in the sensor uses the photoelectric cross-section $\tau$ only, since a scattered
+photon does not deposit its full energy. Escape peaks are not subtracted: they redistribute
+counts within the recorded spectrum and belong to the line shape. Returns a float for a
+scalar input, else an array; energies where xraylib has no data give 0.
+\begin{hyp}
+Normal incidence on a uniform sensor, collimator and grid ignored, single air-path length.
+The air path dominates the efficiency of soft lines: 20\,cm of air transmit about 4\,\% at
+In~L$\alpha$ (3.29\,keV), and each extra centimetre costs about 15\,\% there, against 0.3\,\%
+at Ga~K$\alpha$.
+\end{hyp}
+\pycode{xrf_fit}{Detector.efficiency}
+
+\api[\texttt{Detector.escape\_lines}]{\texttt{Detector.escape\_lines(energy\_ev)}}
+Sensor escape peaks of a line. A photon absorbed in the K shell of the sensor can be followed
+by a sensor K X-ray that leaves the crystal, so the event is recorded at $E-E_X$. For normal
+incidence on a semi-infinite sensor \citep{ReedWare1972},
+\begin{equation}
+  f_X = \tfrac12\,\omega_K\,\frac{\tau_K}{\tau}\,p_X
+  \left[1-\frac{\mu_X}{\mu_E}\ln\!\left(1+\frac{\mu_E}{\mu_X}\right)\right],
+  \label{eq:escape}
+\end{equation}
+with $\omega_K$ the K fluorescence yield of the sensor, $\tau_K/\tau$ the K-shell share of
+photoabsorption at $E$, $p_X$ the radiative branching of the escaping line (K$\alpha$ or
+K$\beta$), $\mu_E$ the photoabsorption coefficient at $E$ and $\mu_X$ the attenuation of the
+escaping X-ray. Returns \fn{[(escape energy in eV, fraction), ...]}, empty below the sensor's
+K edge. Typical values: 0.1\,\% for Ga/As K in Si, about 1\,\% just above the Si K edge.
+\pycode{xrf_fit}{Detector.escape_lines}
+
+\api[\texttt{sigma\_ev}, \texttt{fwhm\_ev}, \texttt{from\_fwhm}]{\texttt{sigma\_ev(energy\_ev, noise\_ev=None, fano=None)}, \texttt{fwhm\_ev(energy\_ev, **kw)}, \texttt{from\_fwhm(fwhm\_ev, at\_energy\_ev, material="Si", fano=0.12, gamma\_ev=5.0, **kw)} (class method)}
+$\sigma(E)$ and FWHM from Eq.~\eqref{eq:resolution}, optionally with other noise and Fano
+values (used by the fit). \fn{from_fwhm} solves Eq.~\eqref{eq:resolution} for $N$ given a
+quoted resolution (``135\,eV at Mn K$\alpha$'') and a Fano factor, and raises
+\fn{ValueError} if the FWHM is below the Fano limit; extra keywords set the efficiency fields.
+\pycode{xrf_fit}{Detector.sigma_ev}
+\pycode{xrf_fit}{Detector.fwhm_ev}
+\pycode{xrf_fit}{Detector.from_fwhm}
+
+\subsection{Fluorescence lines and line groups}\label{sec:lines}
+
+\api[\texttt{Line}, \texttt{LineGroup}]{\texttt{Line(name, energy\_ev, rel)}, \texttt{LineGroup(element, family, lines, ref\_strength=nan)}}
+A \fn{Line} is an IUPAC name without the \fn{_LINE} suffix, a tabulated energy and an
+intensity relative to the reference line of its group. A \fn{LineGroup} is a set of lines of
+one element and one shell family (\fn{"K"}, \fn{"L"}, \fn{"M"}) sharing one amplitude;
+\fn{lines[0]} is the reference line. \fn{ref_strength} keeps the absolute strength of the
+reference line---the normalisation that \fn{rel} divides out: cross-section (cm$^2$/g) at
+the excitation energy, or flux-weighted cross-section, or matrix sensitivity, times the
+detection efficiency if a detector was given. It converts fitted areas into atom ratios.
+Properties: \fn{label} (\fn{"Cu K"}), \fn{reference}, and \fn{total_rel} ($\sum_l r_l$,
+converting the reference-line area into the area of the whole modelled group).
+\pycode{xrf_fit}{Line}
+\pycode{xrf_fit}{LineGroup}
+\pycode{xrf_fit}{LineGroup.label}
+\pycode{xrf_fit}{LineGroup.reference}
+\pycode{xrf_fit}{LineGroup.total_rel}
+
+\api[\texttt{\_family\_of}, \texttt{\_all\_line\_macros}, \texttt{\_is\_iupac\_line}]{\texttt{\_family\_of(macro\_name)}, \texttt{\_all\_line\_macros()}, \texttt{\_is\_iupac\_line(macro\_name)}}
+xraylib exposes every transition twice---under its Siegbahn name (\fn{KA1}, \fn{LB2},
+\fn{LG1}, \fn{LL}) and under its IUPAC name (\fn{KL3}, \fn{L3N5}, \fn{L2N4}, \fn{L3M1})---plus
+composite macros (\fn{KA} = KL3 + KL2). Enumerating all of them would count intensity two or
+three times, so only the IUPAC set is used: it is complete, non-redundant, and has one name
+per transition. The regular expression demands a full subshell designator on both sides
+(\fn{L3M5} matches, \fn{LL} does not). \fn{_family_of} gives the family from the initial
+vacancy; \fn{_all_line_macros} collects every \fn{*_LINE} constant of xraylib.
+\pycode{xrf_fit}{_family_of}
+\pycode{xrf_fit}{_all_line_macros}
+\pycode{xrf_fit}{_is_iupac_line}
+
+\api[\texttt{\_line\_energy\_ev}]{\texttt{\_line\_energy\_ev(z, macro)}}
+Tabulated line energy in eV \citep{Elam2002,Schoonjans2011}, or \fn{None} if the line does
+not exist for that element.
+\pycode{xrf_fit}{_line_energy_ev}
+
+\api[\texttt{\_line\_strength}]{\texttt{\_line\_strength(z, macro, e0\_kev, weighting)}}
+Unnormalised intensity of a line under monochromatic excitation at $E_0$:
+\begin{itemize}[nosep]
+\item \fn{"kissel"}: the partial fluorescence cross-section $Q_l(E_0)$ (cm$^2$/g), which
+  includes the photo-ionisation cross-section of each subshell, the Coster--Kronig transfers
+  between subshells and the fluorescence yields \citep{Krause1979,Campbell2003}, and is
+  therefore comparable across subshells;
+\item \fn{"radrate"}: the radiative rate, normalised \emph{within} each subshell, hence
+  comparable only between lines sharing an initial vacancy. Across an L series it is wrong:
+  for Ir it predicts L$\beta_1$/L$\alpha_1$ = 1.13 where the Kissel cross-sections give 0.65
+  and the measured ratio on the NIO295 map is 0.77.
+\end{itemize}
+Returns 0 below the edge.
+\pycode{xrf_fit}{_line_strength}
+
+\api[\texttt{\_line\_strength\_spectral}]{\texttt{\_line\_strength\_spectral(z, macro, energy\_kev, flux)}}
+The correct strength under polychromatic excitation:
+\begin{equation}
+  S_l = \int Q_l(E)\,\frac{\dd\Phi}{\dd E}\,\dd E ,
+  \label{eq:flux-weighted}
+\end{equation}
+with the per-0.1\,\% bandwidth flux converted to a density per keV
+(Eq.~\eqref{eq:per-energy}; omitting the Jacobian inflated the Ga/As k-factor by about 9\,\%
+on BM32). Each subshell is excited only by the part of the spectrum above its own edge. The
+integral uses the trapezoidal rule, which cannot overshoot at the edge discontinuity
+(Simpson's rule can); with a grid step $h$ the edge error is of order $h$ times the jump, so a
+grid of $\sim$10\,eV keeps it below 0.1\,\%.
+\pycode{xrf_fit}{_line_strength_spectral}
+
+\api[\texttt{element\_line\_groups}]{\texttt{element\_line\_groups(elements, emin\_ev, emax\_ev, e0\_eff\_kev=20.0, families=("K","L","M"), min\_rel=0.01, weighting="kissel", merge\_within\_ev=0.0, incident\_spectrum=None, detector=None, matrix=None)}}
+Builds the line groups to fit.
+\begin{args}
+\item[elements] symbols or atomic numbers.
+\item[emin\_ev, emax\_ev] only lines inside this window are kept (normally the fit range).
+\item[e0\_eff\_kev] single excitation energy for the cross-sections; it must exceed the
+  highest relevant edge, or high-subshell lines silently get zero intensity.
+\item[families] shell families considered.
+\item[min\_rel] lines weaker than this fraction of the group's reference line are dropped.
+\item[weighting] \fn{"kissel"} or \fn{"radrate"} (ignored with a spectrum or a matrix).
+\item[merge\_within\_ev] if positive, lines closer than this are merged into one effective
+  line at their intensity-weighted energy (to shrink the model; the detector cannot resolve
+  them anyway).
+\item[incident\_spectrum] \texttt{(energy\_kev, flux\_per\_0.1\%BW)}: strengths become
+  Eq.~\eqref{eq:flux-weighted}.
+\item[detector] multiplies every strength by $\epsilon(E_l)$, so that relative intensities
+  and \fn{ref_strength} describe the \emph{recorded} spectrum.
+\item[matrix] an \fn{xrf_matrix.MatrixModel}: strengths include self-absorption (and
+  secondary fluorescence for the lines that can survive \fn{min_rel}); it carries its own
+  spectrum, so \fn{incident_spectrum} and \fn{e0_eff_kev} are ignored. \fn{ref_strength}
+  then means sensitivity per unit mass fraction in the target layer.
+\end{args}
+\blk{Returns} one \fn{LineGroup} per (element, family) with at least one line left, in the
+order of \fn{elements}; lines sorted by decreasing relative intensity.
+\blk{Method} For each element and family, every IUPAC line of that family inside the window
+gets its strength (cross-section, flux-weighted cross-section, or matrix emission), times
+the efficiency; the strongest defines the reference; lines below \fn{min_rel} are dropped.
+\pycode{xrf_fit}{element_line_groups}
+
+\api[\texttt{\_merge\_close\_lines}, \texttt{\_collapse}]{\texttt{\_merge\_close\_lines(found, tol\_ev)}, \texttt{\_collapse(bucket)}}
+Lines sorted by energy are grouped while consecutive lines are within \fn{tol_ev}; each group
+becomes one line at the strength-weighted mean energy, with the summed strength and the name
+of its strongest member plus the number of merged lines (\fn{"L3M5+1"}).
+\pycode{xrf_fit}{_merge_close_lines}
+\pycode{xrf_fit}{_collapse}
+
+\subsection{Normalisation, averaging and counting statistics}
+
+\api[\texttt{normalise\_spectra}]{\texttt{normalise\_spectra(spectra, monitor=None, live\_time=None, normalise\_monitor=True)}}
+Corrects raw MCA spectra for the incident flux and the detector dead time,
+\begin{equation}
+  y_i = \frac{x_i}{s_i}, \qquad s_i = \frac{M_i}{\langle M\rangle}\,t_{\mathrm{live},i},
+\end{equation}
+with $M_i$ the monitor of pixel $i$ (divided by its mean if \fn{normalise_monitor}) and
+$t_\mathrm{live}$ the live time reported by the XIA electronics (\fn{xia_det0_live_time}).
+Dividing by the live time turns recorded counts into an incoming rate. On BM32 white-beam
+maps the dead-time fraction varies strongly with position (0.33--0.79 on the NIO295 map, a
+factor 1.5--4.8 in the correction) because it follows the total scattering power, so it does
+not cancel in elemental ratios.
+\blk{Returns} \fn{(corrected, scale)}; pixels with a non-positive or non-finite scale are NaN.
+\pycode{xrf_fit}{normalise_spectra}
+
+\api[\texttt{\_pixel\_rows}]{\texttt{\_pixel\_rows(spectra, name)}}
+Reshapes any array whose last axis is the channel axis---a single spectrum, a list of
+pixels, a gridded map---into $(n_\mathrm{pixels}, n_\mathrm{channels})$.
+\pycode{xrf_fit}{_pixel_rows}
+
+\api[\texttt{average\_spectrum}]{\texttt{average\_spectrum(corrected)}}
+The mean of the valid pixels (those without NaN) and the standard error of that mean,
+$s/\sqrt n$, per channel. The standard error contains both counting noise and real
+pixel-to-pixel variation. With a single spectrum (\fn{ct} scan) the standard error is
+undefined and returned as NaN; use \fn{counting_error} for the fit weights.
+\blk{Returns} \fn{(mean, sem, n_used)}.
+\pycode{xrf_fit}{average_spectrum}
+
+\api[\texttt{counting\_error}]{\texttt{counting\_error(raw\_spectra, scale)}}
+The Poisson uncertainty of the normalised average. With $\bar y = \frac1n\sum_i x_i/s_i$ and
+$\mathrm{Var}(x_i) = x_i$,
+\begin{equation}
+  \sigma_{\bar y} = \frac1n\sqrt{\sum_i \frac{x_i}{s_i^2}} .
+\end{equation}
+This is the right weight for fitting the \emph{average} spectrum: pixel-to-pixel variation is
+signal, not noise, as far as the average is concerned, and on a heterogeneous map the
+standard error can exceed this by an order of magnitude. Accepts any scan shape; \fn{scale}
+can be a scalar.
+\pycode{xrf_fit}{counting_error}
+
+\subsection{Pile-up}
+
+\api[\texttt{pileup\_spectra}]{\texttt{pileup\_spectra(raw\_spectra, calibration, real\_time=1.0, chunk=512)}}
+Per-pixel pile-up spectra per second of resolving time. For random arrivals, two events
+closer than the pulse-pair resolving time $\tau$ are recorded as one event at $E_1+E_2$. With
+$x$ the measured spectrum, recorded in the real time $t$, the number of such pairs at sum
+energy $E$ is \citep{Statham1977}
+\begin{equation}
+  N_\mathrm{pp}(E) = \frac{\tau}{t}\,(x\otimes x)(E),
+\end{equation}
+where $\otimes$ is the self-convolution over ordered pairs; the total, $\tau N^2/t =
+N\,r\,\tau$ with $r$ the count rate, is the expected number of pairs. The function returns
+$(x\otimes x)/t$ on the MCA channel grid, so multiplying by $\tau$ in seconds gives counts.
+\blk{Method} The convolution is computed with FFTs (padded to a power of two above $2n$,
+\citealp{Cooley1965}), in batches of \fn{chunk} pixels. The self-pair term is made unbiased
+by subtracting $x_c$ at index $2c$ ($x_c(x_c-1)$ pairs instead of $x_c^2$), which matters at
+low counts. Index $n$ of the convolution has energy $Gn+2O$ (the offset counts twice), so it
+is mapped back to channel $c = n + O/G$ by linear interpolation.
+\begin{hyp}
+Random (Poisson) arrivals and a single resolving time; pile-up of three or more events is
+neglected. Pile-up removes parent events with a probability independent of their energy, so
+it does not bias line \emph{ratios}; it adds sum peaks that other components would otherwise
+absorb.
+\end{hyp}
+\pycode{xrf_fit}{pileup_spectra}
+
+\api[\texttt{average\_pileup\_template}]{\texttt{average\_pileup\_template(pileup, scale)}}
+Pile-up template for the normalised average spectrum, per microsecond of resolving time:
+$10^{-6}\,\langle P_i/s_i\rangle$. It must be built from the per-pixel spectra, since pile-up
+goes as the square of the local rate; the fitted amplitude is then $\tau$ in \textmu s.
+\pycode{xrf_fit}{average_pileup_template}
+
+\subsection{Background estimate}
+
+\api[\texttt{snip\_background}]{\texttt{snip\_background(y, width=40, iterations=24, smooth=True)}}
+The Statistics-sensitive Non-linear Iterative Peak-clipping algorithm \citep{Ryan1988}. The
+spectrum (optionally smoothed over 3 channels) is transformed by the log-log-square-root
+operator $v = \ln[\ln(\sqrt{y+1}+1)+1]$, which compresses peaks and makes the clipping
+statistics-aware; then each point is replaced by
+$v_c \leftarrow \min\!\left(v_c, \tfrac12(v_{c-w}+v_{c+w})\right)$ for windows $w = 1,\dots,
+W$ and then decreasing again for \fn{iterations} passes (decreasing windows smooth the result,
+\citealp{Morhac1997}); finally the transform is inverted. \fn{width} should exceed the
+half-width of the widest peak. Used by the coarse calibration; the fits themselves model
+the background.
+\pycode{xrf_fit}{snip_background}
+
+\subsection{Line shape}
+
+\api[\texttt{peak\_shape}]{\texttt{peak\_shape(x, sigma, gamma=0.0, tail\_fraction=0.0, tail\_slope=1.5, step\_fraction=0.0)}}
+The unit-area detector response to one line, plus its step, of the Hypermet type
+\citep{Phillips1976,VanGysel2003}:
+\begin{equation}
+  R(x) = (1-t)\,V(x;\sigma,\Gamma)
+  + \frac{t}{2\beta}\,\exp\!\left(\frac{x}{\beta}+\frac{\sigma^2}{2\beta^2}\right)
+    \erfc\!\left(\frac{x}{\sqrt2\sigma}+\frac{\sigma}{\sqrt2\beta}\right)
+  + \frac{s}{2\sqrt{2\pi}\sigma}\,\erfc\!\left(\frac{x}{\sqrt2\sigma}\right),
+  \label{eq:hypermet}
+\end{equation}
+where $x$ is the distance to the line centre (in channels in the model), $V$ is the Voigt
+profile (\fn{scipy.special.voigt_profile}, $\Gamma$ the Lorentzian half width) or the Gaussian
+when $\Gamma = 0$, $t$ the tail fraction, $\beta = $ \fn{tail_slope}$\times\sigma$ the decay
+length of the tail, and $s$ the step height relative to the Gaussian peak height
+$1/(\sqrt{2\pi}\sigma)$. The tail term is the convolution of a one-sided exponential
+$\e^{x/\beta}/\beta$ ($x<0$) with the Gaussian, and has unit area; the step is the
+convolution of a flat shelf with the Gaussian. Both describe incomplete charge collection:
+part of the charge of some events is lost near the entrance window or the sensor edges, so
+the event is recorded below the full energy.
+\blk{Numerics} The tail term overflows when evaluated directly: the exponential diverges
+where $\erfc$ underflows. With $z = (x/\sigma+\sigma/\beta)/\sqrt2$ and the scaled
+complementary error function $\erfcx(z) = \e^{z^2}\erfc(z)$, the identity
+$x/\beta + \sigma^2/2\beta^2 - z^2 = -x^2/2\sigma^2$ gives
+\begin{equation}
+  \exp\!\left(\frac{x}{\beta}+\frac{\sigma^2}{2\beta^2}\right)\erfc(z) =
+  \begin{cases}
+    \e^{-x^2/2\sigma^2}\,\erfcx(z), & z>0,\\
+    \exp\!\left(\frac{x}{\beta}+\frac{\sigma^2}{2\beta^2}\right)\erfc(z), & z\le0,
+  \end{cases}
+\end{equation}
+both of which are finite (the exponent in the second case is capped at 50).
+\begin{hyp}
+One tail and one step shared by all lines, in units of $\sigma$; real detectors show a tail
+fraction that decreases with energy and may need a second, long tail. The step is a fraction
+of the peak \emph{height}, so its area per unit energy scales with $1/\sigma$.
+\end{hyp}
+\pycode{xrf_fit}{peak_shape}
+
+\subsection{Scatter peaks under monochromatic excitation}\label{sec:scatter}
+
+Under monochromatic excitation the spectrum also contains the photons scattered by the
+sample: elastically (Rayleigh) at the excitation energy, and inelastically (Compton) at
+lower energy. With a white beam the scattered radiation is a continuum and belongs to the
+background.
+
+\paragraph{Compton energy.} A photon of energy $E_0$ scattered by a free electron at rest
+through the angle $\theta$ has the energy \citep{Compton1923}
+\begin{equation}
+  E_C = \frac{E_0}{1 + \dfrac{E_0}{m_ec^2}(1-\cos\theta)} .
+  \label{eq:compton}
+\end{equation}
+
+\paragraph{Impulse approximation.} Electrons are bound and moving, which broadens the Compton
+line. In the impulse approximation \citep{Eisenberger1970,Ribberfors1975} the energy
+distribution of photons scattered at angle $\theta$ is
+\begin{equation}
+  \frac{\dd^2\sigma}{\dd\Omega\,\dd E} \propto J(p_z)\,\frac{\dd p_z}{\dd E},
+  \qquad
+  p_z = \frac{E_0E(1-\cos\theta)/m_ec^2 - (E_0-E)}{\sqrt{E_0^2+E^2-2E_0E\cos\theta}},
+  \label{eq:pz}
+\end{equation}
+where $p_z$ is the projection of the electron momentum on the scattering vector, in units of
+$m_ec$ in Eq.~\eqref{eq:pz} (multiplied by $1/\alpha = 137.036$ to obtain atomic units), and
+$J(p_z)$ is the Compton profile of the scatterer: the sum of the tabulated Hartree--Fock
+profiles of its atoms \citep{Biggs1975}, available in xraylib as \fn{ComptonProfile}. Outer
+electrons give a sharp core, inner shells broad wings. The peak is centred at $p_z=0$, i.e.
+at $E_C$.
+
+\paragraph{Range of scattering angles.} A detector close to the sample (2\,mm on the
+training spectrum of Section~\ref{sec:notebooks}) collects photons scattered over several
+tens of degrees. Since Eq.~\eqref{eq:compton} is non-linear in the angle, the Compton peak
+becomes broad and asymmetric; the model averages it over an angle range that is fitted.
+
+\api[\texttt{\_angle\_grid}]{\texttt{\_angle\_grid(angle\_deg, spread\_deg, n=15)}}
+Scattering angles sampled uniformly over $\theta\pm\Delta\theta$ (15 points), clipped to
+1--179\textdegree; a single angle when the spread is below 0.05\textdegree.
+\pycode{xrf_fit}{_angle_grid}
+
+\api[\texttt{ScatterSource}]{\texttt{ScatterSource(energies\_ev, weights=(1.0,), angle\_deg=90.0, scatterer=None)}}
+The monochromatic excitation, for the elastic and Compton peaks.
+\begin{args}
+\item[energies\_ev, weights] excitation lines and their relative intensities (normalised
+  internally), e.g. from \fn{tube_lines("Mo")}.
+\item[angle\_deg] scattering angle between the incident beam and the direction to the
+  detector: the starting value of the fitted Compton angle.
+\item[scatterer] chemical formula of the scattering medium (\fn{"H2O"}): the Compton peak then
+  has the impulse-approximation shape; without it, the Compton peak is a Gaussian (averaged
+  over the angle range).
+\end{args}
+\blk{Methods} \fn{compton_energy_ev(e_ev, angle_deg)} is Eq.~\eqref{eq:compton};
+\fn{profile_table()} tabulates $J(p_z)$ of one formula unit for $0\le p_z\le60$ atomic units
+(3001 points), summing the atoms of the formula with their multiplicities; \fn{compton_pz}
+is Eq.~\eqref{eq:pz} in atomic units.
+\begin{hyp}
+\begin{itemize}[nosep,leftmargin=1em]
+\item The prefactor of the impulse-approximation cross-section (Klein--Nishina factor and
+  $E/E_0$ terms, \citealp{Klein1929,Ribberfors1975}) is taken as constant across the peak, and
+  the angular distribution as uniform over $\theta\pm\Delta\theta$ (no Klein--Nishina, solid
+  angle or polarisation weighting). The free angle and spread absorb these approximations.
+\item The elastic peak has a free amplitude; its intensity is not computed from atomic form
+  factors.
+\item The scattering medium is the given formula (the matrix), not the full sample; the
+  profile of trace elements is negligible.
+\end{itemize}
+\end{hyp}
+\pycode{xrf_fit}{ScatterSource}
+\pycode{xrf_fit}{ScatterSource.__post_init__}
+\pycode{xrf_fit}{ScatterSource.compton_energy_ev}
+\pycode{xrf_fit}{ScatterSource.profile_table}
+\pycode{xrf_fit}{ScatterSource.compton_pz}
+
+\subsection{\texttt{XRFModel}}\label{sec:xrfmodel}
+
+\api[\texttt{XRFModel}]{\texttt{XRFModel(groups, calibration, detector, channels, background\_order=1, fit\_resolution=True, fit\_gamma=True, escape=False, pileup\_template=None, fit\_pileup=True, pileup\_tau\_us=0.2, fit\_calibration=False, fit\_air\_path=False, fit\_tails=False, scatter=None, background\_kind="poly")}}
+Eq.~\eqref{eq:model} as a callable with the signature that \fn{curve_fit} expects,
+\fn{model(channels, *params)}. Table~\ref{tab:params} lists the parameters, in their order in
+the parameter vector; \fn{param_names} holds the names.
+
+\begin{table}[h]
+\centering\small
+\caption{Parameters of \fn{XRFModel}, in order. Optional blocks appear only when the
+corresponding option is set.}
+\label{tab:params}
+\begin{tabularx}{\textwidth}{@{}l l X@{}}
+\toprule
+Name & Present if & Meaning \\
+\midrule
+\fn{bkg_0} \dots\ \fn{bkg_n} & \fn{background_order} not \fn{None} & background coefficients
+in $u\in[-1,1]$ \\
+\fn{A_<group>} & always & reference-line area of each group (counts summed over channels) \\
+\fn{noise_ev}, \fn{fano} & \fn{fit_resolution} & resolution law, Eq.~\eqref{eq:resolution} \\
+\fn{gamma_ev} & \fn{fit_gamma} & Lorentzian half width \\
+\fn{cal_gain}, \fn{cal_offset_ev} & \fn{fit_calibration} & calibration (only the offset with
+\fn{"offset"}) \\
+\fn{air_path_cm} & \fn{fit_air_path} & sample--detector air path \\
+\fn{tail_fraction}, \fn{tail_slope}, \fn{step_fraction} & \fn{fit_tails} & detector line
+shape, Eq.~\eqref{eq:hypermet} \\
+\fn{A_elastic}, \fn{elastic_sigma_ev} & \fn{scatter} & elastic area and extra Gaussian
+width (monochromator bandwidth) \\
+\fn{A_compton}, \fn{compton_angle_deg}, \fn{compton_angle_spread_deg} & \fn{scatter} &
+Compton area, mean angle and half range \\
+\fn{compton_sigma_ev}, \fn{compton_tail_fraction}, \fn{compton_tail_slope} & \fn{scatter} &
+extra Gaussian width and low-energy tail of the Compton peak \\
+\fn{pileup_tau_us} & template and \fn{fit_pileup} & pulse-pair resolving time (\textmu s) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{args}
+\item[groups] from \fn{element_line_groups} (may be empty with a scatter source).
+\item[calibration] fixed calibration, or the starting point when it is fitted.
+\item[detector] resolution, efficiency and line shape; supplies the starting (or fixed) values
+  of the shared parameters.
+\item[channels] channel grid of the fit range.
+\item[background\_order] polynomial order (\fn{None}: no background term).
+\item[background\_kind] \fn{"poly"}: the background is the polynomial; \fn{"exp"}: its
+  exponential, positive by construction and closer to a scatter continuum over a wide range
+  (non-linear in its coefficients).
+\item[fit\_resolution, fit\_gamma] free $N$, $F$ and $\Gamma$.
+\item[escape] add the escape peaks of every line, tied to its amplitude (no extra parameter):
+  the group amplitude then counts parent and escape, i.e. every photon absorbed in the sensor,
+  which is what \fn{Detector.efficiency} describes.
+\item[pileup\_template, fit\_pileup, pileup\_tau\_us] pile-up spectrum per \textmu s (full MCA
+  range), with $\tau$ free or fixed. The sum peaks of the main lines usually lie above the
+  analysis range: fit $\tau$ once over an extended range and fix it in the analysis.
+\item[fit\_calibration] \fn{True} (gain and offset), \fn{"offset"} (energy shift only) or
+  \fn{False}.
+\item[fit\_air\_path] free air path $d$. The relative intensities were computed at $d_0 =$
+  \fn{detector.air_path_cm}; at $d$ each line is rescaled by
+  $\tau_l = \exp[-(\mu_l-\mu_\mathrm{ref})(d-d_0)]$, with $\mu$ the linear attenuation of air
+  at the line and at the group's reference line. The information comes from intensity ratios
+  within groups (K$\alpha$/K$\beta$, L$\alpha$/L$\beta$/L$\gamma$), independent of the sample
+  composition; the amplitudes absorb the rest.
+\item[fit\_tails] free tail and step, shared by all lines.
+\item[scatter] a \fn{ScatterSource}: adds the elastic and Compton peaks.
+\end{args}
+\pycode{xrf_fit}{XRFModel}
+\pycode{xrf_fit}{XRFModel.__init__}
+
+The constructor precomputes the escape lines of every line, the air attenuation differences
+$\mu_l-\mu_\mathrm{ref}$, the Compton profile table, the energies of the channel grid and the
+scaled coordinate $u = 2(c-c_0)/(c_1-c_0) - 1 \in [-1,1]$ in which the background polynomial
+is evaluated (powers of $u$ stay of order 1, which keeps the fit well conditioned).
+
+\api{\texttt{\_unpack}, \texttt{calibration\_of}, \texttt{air\_path\_of}, \texttt{pileup\_tau\_us}, \texttt{pileup\_profile}, \texttt{tails\_of}}
+Accessors that read a parameter vector: background coefficients, amplitudes and resolution
+parameters (fitted values, or the detector's when frozen); the calibration, air path,
+resolving time and line-shape parameters, fitted or fixed. \fn{pileup_profile} is
+$\tau_\mathrm{pp}P(c)$ on the fit range.
+\pycode{xrf_fit}{XRFModel._unpack}
+\pycode{xrf_fit}{XRFModel.calibration_of}
+\pycode{xrf_fit}{XRFModel.air_path_of}
+\pycode{xrf_fit}{XRFModel.pileup_tau_us}
+\pycode{xrf_fit}{XRFModel.pileup_profile}
+\pycode{xrf_fit}{XRFModel.tails_of}
+
+\api[\texttt{background}, \texttt{\_shape}]{\texttt{background(params)}, \texttt{\_shape(centre\_ch, sigma\_ch, gamma\_ch, tails)}}
+$B = \sum_k b_k u^k$, or $\exp(\sum_k b_k u^k)$ with the exponent clipped to $\pm50$.
+\fn{_shape} evaluates \fn{peak_shape} on the channel grid.
+\pycode{xrf_fit}{XRFModel.background}
+\pycode{xrf_fit}{XRFModel._shape}
+
+\api[\texttt{group\_profile}]{\texttt{group\_profile(index, params, sigma\_scale=1.0)}}
+The counts of one group, Eq.~\eqref{eq:model} without background: for each line, the parent
+peak with weight $A_g r_l\tau_l(1-\sum_e f_{le})$ and each escape peak with weight
+$A_g r_l\tau_l f_{le}$. Profiles are evaluated in \emph{channel} space, with widths
+$\sigma/G$ in channels: since the profile has unit area over its argument, the amplitude is
+directly the number of counts summed over channels. An escape peak has the resolution of its
+own (deposited) energy. \fn{sigma_scale} multiplies every Gaussian width; it is used for the
+width-correction term of \fn{fit_map}.
+\pycode{xrf_fit}{XRFModel.group_profile}
+
+\api[\texttt{scatter\_profile}, \texttt{\_compton\_kernel}, \texttt{\_compton\_ia}]{\texttt{scatter\_profile(params, which="both")}, \texttt{\_compton\_kernel(x, sigma, v, step)}, \texttt{\_compton\_ia(cal, e0, v, noise, fano, tails)}}
+The scatter peaks, for each excitation line with its weight:
+\begin{itemize}[nosep]
+\item \textbf{elastic}: the detector response at $E_0$ with the width
+  $\sqrt{\sigma^2(E_0)+\sigma_\mathrm{el}^2}$ (the extra width stands for the bandwidth of the
+  monochromator), with its escape peaks;
+\item \textbf{Compton}, impulse approximation (with a scatterer): \fn{_compton_ia} evaluates
+  $J(|p_z|)\,|\dd p_z/\dd E|$ on a channel grid extended 3\,keV below the fit range (so that
+  the wings are not cut), summed over the angle grid, set to zero above $E_0$ and normalised
+  to unit area. It is convolved by FFT with the Compton kernel---a Gaussian of width
+  $\sqrt{\sigma^2(E_C)+\sigma_C^2}$ with its own low-energy tail
+  (\fn{compton_tail_fraction}, \fn{compton_tail_slope})---to which the detector step is added
+  as a shelf proportional to the number of counts above each channel. The escape peaks are
+  shifted copies of this base profile;
+\item \textbf{Compton}, Gaussian (without scatterer): the kernel at $E_C(\theta)$ for each
+  angle of the grid, averaged, with escape peaks.
+\end{itemize}
+Returns zeros without a scatter source.
+\pycode{xrf_fit}{XRFModel.scatter_profile}
+\pycode{xrf_fit}{XRFModel._compton_kernel}
+\pycode{xrf_fit}{XRFModel._compton_ia}
+
+\api[\texttt{\_\_call\_\_}]{\texttt{\_\_call\_\_(channels, *params)}}
+The total model: background, pile-up, scatter, and every group.
+\pycode{xrf_fit}{XRFModel.__call__}
+
+\api[\texttt{initial\_guess}]{\texttt{initial\_guess(y)}}
+Starting values and bounds from the data. The background starts at the 5th percentile of the
+spectrum (its logarithm for \fn{"exp"}), other coefficients at 0. Each amplitude is seeded
+from the observed height above that baseline at the strongest line of the group inside the
+range, divided by its relative intensity and converted to an area with the modelled width,
+$A = h\,\sigma\sqrt{2\pi}$. Bounds: amplitudes $\ge0$; noise 1--200\,eV; Fano 0.01--1;
+$\Gamma$ 0--100\,eV; gain $\pm20\,\%$; offset $\pm50$ channels; air path 0--200\,cm; tail
+fraction 0--0.6, slope 0.2--20\,$\sigma$, step 0--0.1; Compton angle 10--175\textdegree,
+spread 0--80\textdegree, extra widths up to 0.5\,keV (elastic) and 2\,keV (Compton); resolving
+time 0--50\,\textmu s.
+\begin{hyp}
+The non-linear parameters (calibration, Compton angle) need a good start: a calibration off
+by tens of channels can lead to a wrong local minimum. Start from a calibration fitted on
+known peaks (\fn{xrf_calibration.calibration_from_peaks} or \fn{calibrate}).
+\end{hyp}
+\pycode{xrf_fit}{XRFModel.initial_guess}
+
+\subsection{Fitting a spectrum}\label{sec:fitting}
+
+\api{\texttt{FitResult}}
+The outcome of a fit: the \fn{model}, the parameters \fn{popt}, their errors \fn{perr} and
+covariance \fn{pcov}, the fitted \fn{channels}, data \fn{y}, errors \fn{yerr} and model
+\fn{yfit}, the reduced $\chi^2$, and the group \fn{areas} and \fn{area_errors} (reference-line
+areas). Properties and methods: \fn{calibration} (fitted or fixed), \fn{residual},
+\fn{residual_normalised} (in units of the data error), \fn{params()} (\texttt{\{name: (value,
+error)\}}), \fn{summary()} (text report with the total area of every group).
+\pycode{xrf_fit}{FitResult}
+\pycode{xrf_fit}{FitResult.calibration}
+\pycode{xrf_fit}{FitResult.residual}
+\pycode{xrf_fit}{FitResult.residual_normalised}
+\pycode{xrf_fit}{FitResult.params}
+\pycode{xrf_fit}{FitResult.summary}
+
+\api[\texttt{fit\_average\_spectrum}]{\texttt{fit\_average\_spectrum(y, groups, calibration, detector, roi, yerr=None, background\_order=1, fit\_resolution=True, fit\_gamma=True, maxfev=20000, escape=False, pileup\_template=None, fit\_pileup=True, pileup\_tau\_us=0.2, fit\_calibration=False, fit\_air\_path=False, fit\_tails=False, scatter=None, background\_kind="poly")}}
+Fits Eq.~\eqref{eq:model} to one spectrum (a map average, a single point, a reference
+spectrum).
+\begin{args}
+\item[y] spectrum over the full MCA range (sliced to \fn{roi} internally).
+\item[groups, calibration, detector] as for \fn{XRFModel}.
+\item[roi] half-open channel range of the fit.
+\item[yerr] one-sigma errors per channel (e.g. \fn{counting_error}); zero errors are raised to
+  the smallest positive one, which would otherwise make the fit singular.
+\item[maxfev] limit on function evaluations.
+\item[others] passed to \fn{XRFModel}.
+\end{args}
+\blk{Method} Weighted non-linear least squares,
+\begin{equation}
+  \chi^2(\mathbf p) = \sum_c \left(\frac{y_c - y(c;\mathbf p)}{\sigma_c}\right)^2,
+\end{equation}
+minimised by \fn{scipy.optimize.curve_fit} with bounds, i.e.\ the trust-region reflective
+algorithm \citep{Branch1999,Virtanen2020}. With \fn{absolute_sigma=True} the covariance is
+$(\mathbf J^\mathsf T\mathbf W\mathbf J)^{-1}$ at the minimum, not rescaled by $\chi^2_\nu$, so
+the reported errors are the statistical ones \citep{Bevington2003}. The reduced
+$\chi^2_\nu = \chi^2/(n-p)$ measures the quality of the model: values well above 1 mean that
+the residuals are dominated by model errors, and the statistical errors then underestimate
+the true uncertainty.
+\begin{hyp}
+Gaussian errors. Minimising $\chi^2$ with data-derived weights (Neyman's $\chi^2$) biases
+the amplitudes low at low counts \citep{Baker1984,Mighell1999}; map averages and long single
+measurements have many counts per channel, where the bias is negligible.
+\end{hyp}
+\blk{Returns} a \fn{FitResult}.
+\pycode{xrf_fit}{fit_average_spectrum}
+
+\subsection{Maps: the per-pixel linear solve}
+
+Once the shape parameters (resolution, calibration, tails, pile-up time) are fixed by the fit
+of the average spectrum, Eq.~\eqref{eq:model} is \emph{linear} in the remaining parameters:
+the background coefficients and the group amplitudes. Every pixel is then solved exactly and
+at once, with its own covariance, instead of running a non-linear fit per pixel.
+
+\api{\texttt{MapResult}}
+Per-pixel results: \fn{group_labels}, \fn{areas} and \fn{area_errors} $(n_\mathrm{pixels},
+n_\mathrm{groups})$, \fn{background} coefficients, \fn{chi2_red}, \fn{total_rel}, map
+\fn{shape}, and optionally \fn{width_change} and \fn{segments}.
+\blk{Methods}
+\fn{area_map(label, total=False)} and \fn{error_map} reshape a group's areas (or errors) to
+the map, optionally scaled to the whole series; \fn{snr} is their ratio;
+\fn{width_change_map} reshapes the width term; \fn{ratio_map(numerator, denominator)} returns
+the ratio of two groups' areas with the propagated error,
+$\sigma_r = |r|\sqrt{(\sigma_a/a)^2+(\sigma_b/b)^2}$; \fn{quality_report} lists, per group, the
+median area, the median signal-to-noise and the fraction of negative pixels, and flags groups
+as quantitative (median S/N $\ge$ 20 by default), detected only (S/N $\ge$ 3: the map is noise
+and the average area a lower bound), or not detected.
+\pycode{xrf_fit}{MapResult}
+\pycode{xrf_fit}{MapResult.width_change_map}
+\pycode{xrf_fit}{MapResult.area_map}
+\pycode{xrf_fit}{MapResult.error_map}
+\pycode{xrf_fit}{MapResult.snr}
+\pycode{xrf_fit}{MapResult.quality_report}
+\pycode{xrf_fit}{MapResult.ratio_map}
+
+\api[\texttt{number\_ratio}]{\texttt{number\_ratio(area\_a, area\_b, group\_a, group\_b, err\_a=None, err\_b=None)}}
+Atom-number ratio from two reference-line areas,
+\begin{equation}
+  \frac{n_a}{n_b} = \frac{A_a}{A_b}\,\frac{S_bW_b}{S_aW_a},
+\end{equation}
+with $S$ the groups' \fn{ref_strength} (mass cross-section $\times$ excitation $\times$
+efficiency) and $W$ the atomic weights, which turn mass cross-sections into per-atom ones.
+Errors are propagated as uncorrelated. Returns \fn{(ratio, ratio_err, k)} with $k$ the factor
+multiplying $A_a/A_b$.
+\begin{hyp}
+Both groups come from the same \fn{element_line_groups} configuration, and matrix effects
+are negligible or equal for the two lines (thin sample). Otherwise use
+\fn{xrf_matrix.quantify_layer}.
+\end{hyp}
+\pycode{xrf_fit}{number_ratio}
+
+\api[\texttt{design\_matrix}]{\texttt{design\_matrix(model, shape\_params)}}
+The columns of the linear model: $u^k$ for the background terms, then the profile of each
+group with unit amplitude (\fn{group_profile} with all other amplitudes set to 0). Returns an
+$(n_\mathrm{channels}, n_\mathrm{bkg}+n_\mathrm{groups})$ array.
+\pycode{xrf_fit}{design_matrix}
+
+\api[\texttt{fit\_map}]{\texttt{fit\_map(raw\_spectra, scale, model, shape\_params, map\_shape, poisson\_weights=True, clip\_negative=False, pileup=None, segments=None, width\_correction=False)}}
+Solves the fixed-shape model for every pixel.
+\begin{args}
+\item[raw\_spectra] raw counts $(n_\mathrm{pixels}, n_\mathrm{channels})$: the weights are
+  defined on counts, and the normalisation is applied internally.
+\item[scale] the normalisation divisors of \fn{normalise_spectra}.
+\item[model] an \fn{XRFModel} for the fit range (no scatter, polynomial background).
+\item[shape\_params] parameter vector of the average fit, or \texttt{\{segment: vector\}}.
+\item[map\_shape] $(n_\mathrm{slow}, n_\mathrm{fast})$.
+\item[poisson\_weights] weight each channel by $1/\mathrm{Var}(y) = s^2/\max(x,1)$. Without
+  them the strongest channels dominate every pixel and the errors are meaningless.
+\item[clip\_negative] clip negative amplitudes to zero (off: a negative amplitude is a
+  diagnostic of a mis-specified model).
+\item[pileup] per-pixel pile-up spectra; with a pile-up term in the model,
+  $\tau P_i/s_i$ is subtracted from each pixel before the solve (a known, pixel-specific
+  component).
+\item[segments] per-pixel segment labels, with \fn{shape_params} per segment: each segment
+  is solved with its own widths, the exact treatment of an abrupt resolution change.
+\item[width\_correction] add one first-order width term per pixel (below).
+\end{args}
+\blk{Method} For each pixel $p$ with design matrix $\mathbf A$ and weights $\mathbf W_p$, the
+weighted least-squares solution and its covariance are
+\begin{equation}
+  \hat{\mathbf c}_p = (\mathbf A^\mathsf T\mathbf W_p\mathbf A)^{-1}\mathbf A^\mathsf T
+  \mathbf W_p\mathbf y_p, \qquad
+  \mathrm{Cov}(\hat{\mathbf c}_p) = (\mathbf A^\mathsf T\mathbf W_p\mathbf A)^{-1},
+\end{equation}
+assembled for all pixels at once with \fn{einsum} (each system is only $k\times k$) and solved
+in one batched call; a relative ridge of $10^{-12}$ times the trace keeps empty pixels from
+making a system singular (they are set to NaN afterwards). The reduced $\chi^2$ of each pixel
+uses the same weights.
+\blk{Width correction} If the detector resolution changes slightly during the scan, the fixed
+widths bias overlapping peaks. The extra column is the derivative of the modelled peaks with
+respect to a common relative scaling $\varepsilon$ of every Gaussian width, at the shape
+amplitudes $\mathbf a$, computed by central differences ($\pm2\,\%$). A pixel modelled as
+$\lambda\sum_j a_j g_j[(1+\varepsilon)\sigma] \approx \lambda\sum_j a_j g_j + \lambda\varepsilon
+\,\partial_\varepsilon(\cdot)$ has a width coefficient $\delta = \lambda\varepsilon$, with
+$\lambda$ the projection of the pixel's amplitudes on $\mathbf a$; hence $\varepsilon =
+\delta/\lambda$ is returned as \fn{width_change}. First order: valid for changes of a few per
+cent, and if the relative amplitudes stay close to those of the average.
+\pycode{xrf_fit}{fit_map}
+
+\subsection{Resolution stability during a scan}
+
+\api[\texttt{width\_window}]{\texttt{width\_window(groups, areas, detector, min\_frac=0.03, doublet\_ev=60.0)}}
+Chooses a clean energy window around a strong, isolated line to monitor the resolution. For
+each group's reference line, the half width is $\min(2.5\,\mathrm{FWHM}, d/2)$ with $d$ the
+distance to the nearest line of expected area above \fn{min_frac} of the candidate's (lines
+closer than \fn{doublet_ev}, such as K$\alpha_{1,2}$, belong to the peak); the score is the
+area times the Gaussian fraction inside the window, $\mathrm{erf}(h/\sqrt2\sigma)$, and
+windows narrower than 1.2\,FWHM are rejected. Returns \fn{(emin_ev, emax_ev, label)}.
+\pycode{xrf_fit}{width_window}
+
+\api[\texttt{peak\_width\_profile}]{\texttt{peak\_width\_profile(raw\_spectra, calibration, window\_ev, bin\_size)}}
+The centroid and r.m.s. width of a peak along the acquisition order. Consecutive pixels are
+summed in bins (one map row is a natural bin), a linear background between the window edges
+is removed, and the first and second moments of the net peak give the centroid $\bar E$ and
+the width $w$, with the statistical error $w/\sqrt{2n}$ of a Gaussian width estimated from
+$n$ counts. A resolution change shows as a step in $w$, a gain or offset change as a step in
+$\bar E$. Independent of the normalisation. Returns \texttt{\{width\_ev, centroid\_ev, counts,
+width\_err\_ev\}}.
+\pycode{xrf_fit}{peak_width_profile}
+
+\api[\texttt{detect\_steps}]{\texttt{detect\_steps(values, window=5, threshold=6.0, min\_step=0.0)}}
+Finds abrupt jumps in a series. At each index the difference between the means of the
+\fn{window} points after and before is divided by its noise, $\sigma\sqrt{2/w}$, where
+$\sigma$ is the point-to-point noise estimated robustly from the median absolute deviation of
+successive differences, $\sigma = 1.4826\,\mathrm{MAD}(\Delta v)/\sqrt2$ \citep{Hampel1974}.
+Local maxima of this statistic above \fn{threshold}, with a step larger than \fn{min_step},
+are returned (a new level starts at each index). Slow drifts are better handled by the width
+term of \fn{fit_map}.
+\pycode{xrf_fit}{detect_steps}
+
+\api[\texttt{segment\_labels}, \texttt{fit\_segments}]{\texttt{segment\_labels(steps, n\_bins, bin\_size, n\_pixels=None)}, \texttt{fit\_segments(corrected, raw\_spectra, scale, segments, groups, calibration, detector, roi, pileup=None, **fit\_kw)}}
+\fn{segment_labels} turns step positions (in bins) into a label per pixel (0, 1, \dots), the
+last incomplete bin taking the last label. \fn{fit_segments} fits the average spectrum of
+each segment, with its own counting error and pile-up template, and returns
+\texttt{\{label: FitResult\}}; \texttt{\{label: r.popt\}} then goes to \fn{fit_map} with the same
+segments.
+\pycode{xrf_fit}{segment_labels}
+\pycode{xrf_fit}{fit_segments}
+
+\subsection{Diagnostics and plots}
+
+\api[\texttt{identify\_peaks}]{\texttt{identify\_peaks(y, calibration, roi, prominence\_frac=0.01, tol\_ev=70.0, min\_rate=0.08, z\_range=(12, 83), n\_candidates=4)}}
+A scouting tool for choosing the element list: peaks are found with
+\fn{scipy.signal.find_peaks} (prominence above \fn{prominence_frac} of the maximum, at least 8
+channels apart), and for each peak the tabulated IUPAC lines within \fn{tol_ev}, of elements
+in \fn{z_range} and with a radiative rate above \fn{min_rate}, are listed, strongest rate
+first. An energy coincidence is only a hint: an element is confirmed when its whole line
+series fits. Returns \texttt{[\{channel, energy\_ev, height, candidates\}]}.
+\pycode{xrf_fit}{identify_peaks}
+
+\api[\texttt{pixel\_parameters}, \texttt{select\_pixels}]{\texttt{pixel\_parameters(model, map\_result, shape\_params, pixel)}, \texttt{select\_pixels(map\_result, n=10, mode="random", seed=0)}}
+\fn{pixel_parameters} rebuilds a full parameter vector for one pixel (its background and
+amplitudes from the map solve, the shape from the average fit or its segment).
+\fn{select_pixels} picks pixel indices to inspect: \fn{"random"} among finite fits,
+\fn{"worst"} and \fn{"best"} by reduced $\chi^2$, or \fn{"spread"} along the $\chi^2$
+distribution in equal quantiles.
+\pycode{xrf_fit}{pixel_parameters}
+\pycode{xrf_fit}{select_pixels}
+
+\api[\texttt{plot\_pixel\_fits}]{\texttt{plot\_pixel\_fits(raw\_spectra, scale, model, map\_result, shape\_params, pixels=None, n=10, mode="random", seed=0, ncols=5, energy\_axis=True, logy=True, show\_components=True, figsize\_per\_panel=(3.2, 2.6), pileup=None)}}
+A grid of individual pixel spectra with their fitted model, components shaded and the
+pixel's $\chi^2_\nu$ in the title: the direct check that the fixed line ratios hold pixel by
+pixel and that the background is plausible at the local count level. With pile-up, the
+per-pixel pile-up spectra replace the map average. Returns \fn{(fig, axes, pixels)}.
+\pycode{xrf_fit}{plot_pixel_fits}
+
+\api[\texttt{plot\_fit}]{\texttt{plot\_fit(result, energy\_axis=True, logy=False, figsize=(11.0, 7.0), data\_label="map-averaged data", ylabel=...)}}
+Two panels: the spectrum with its error band, the background, every group (shaded, with its
+reference line marked), the scatter peaks if any, and the total model; below, the residual in
+units of the data error. Returns \fn{(fig, (ax_spectrum, ax_residual))}.
+\pycode{xrf_fit}{plot_fit}

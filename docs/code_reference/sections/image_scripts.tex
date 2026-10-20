@@ -1,0 +1,160 @@
+%==========================================================================================
+\section{Diffraction-image scripts}\label{sec:images}
+%==========================================================================================
+
+Two command-line scripts process the detector frames of a BLISS mesh scan, typically the
+Laue patterns of a microdiffraction map \citep{Ulrich2011}. Both read the scan through
+\fn{bliss_hdf5_reader.BlissMeshScan} and parallelise the reading over processes.
+
+%------------------------------------------------------------------------------------------
+\subsection{\texttt{reduce\_image\_series}: minimum, maximum and mean images}
+%------------------------------------------------------------------------------------------
+
+\fn{python reduce_image_series.py master.h5 -s 1 -o OUTPUT_DIR [--image_suffix .h5] [-c 50]
+[-w N]} computes, pixel by pixel, the minimum, maximum and mean over every frame of a scan,
+and saves them in \fn{<master>_scanNNNN_reduced.h5}. The maximum image shows every Laue spot
+that appears anywhere in the map; the minimum image is the background common to all frames
+(useful to subtract, and to find hot or dead pixels); the mean is the average pattern.
+
+The reduction is a map--reduce: the file list is split into chunks of \fn{chunk_size} files;
+each worker returns the minimum, maximum and sum of its chunk and the number of valid frames;
+the partial results are combined as they arrive (minimum and maximum are associative, sums
+add), and the mean is the total sum over the number of frames. Sums are accumulated in
+float64 to avoid integer overflow over thousands of frames.
+
+\begin{issue}
+The script iterates over image \emph{files} (\fn{scan.image_path_list}) and
+\fn{_read_frame_array} returns the \emph{first} frame of each file. This is correct when the
+detector saves one frame per file; when files hold several frames, only one frame per file is
+reduced, and the \fn{processed_frames} attribute (the number of files) overstates the frames
+used. The frame-level access of the reader (\fn{iter_frames}, as in
+\fn{make_dynamic_mosaic}) would remove this restriction. The scan must also be
+two-dimensional (\fn{BlissMeshScan}).
+\end{issue}
+
+\pycode{reduce_image_series}{_header}
+
+\api[\texttt{parse\_args}]{\texttt{parse\_args()}}
+Command-line arguments: the master file, \fn{-s/--scan} (scan number), \fn{-o/--output_dir},
+\fn{--image_suffix} (default \fn{.h5}), \fn{-c/--chunk_size} (files per task, default 50),
+\fn{-w/--workers} (default: all cores).
+\pycode{reduce_image_series}{parse_args}
+
+\api[\texttt{\_read\_frame\_array}]{\texttt{\_read\_frame\_array(filepath)}}
+Reads the image of a detector file: first the usual Lima/BLISS dataset paths
+(\fn{/entry_0000/measurement/data}, \fn{.../instrument/eiger4m/data},
+\fn{.../CRGIF/eiger4m/data}), else the first dataset of two or more dimensions found under
+\fn{/entry_0000}; for a 3D dataset the first frame is returned. Raises \fn{KeyError} if no
+image is found.
+\pycode{reduce_image_series}{_read_frame_array}
+
+\api[\texttt{\_worker\_process\_files}]{\texttt{\_worker\_process\_files(file\_paths)}}
+The map step: running minimum, maximum and float64 sum over a list of files, skipping
+unreadable files with an error message. Returns \fn{(min, max, sum, n_valid)}, with
+\fn{None} arrays if no file could be read.
+\pycode{reduce_image_series}{_worker_process_files}
+
+\api[\texttt{compute\_scan\_reductions}]{\texttt{compute\_scan\_reductions(image\_files, chunk\_size=50, num\_workers=None)}}
+The reduce step, with a \fn{multiprocessing.Pool} and a progress bar. Returns
+\fn{(min_image, max_image, mean_image)}; raises if the list is empty or no frame could be
+read.
+\pycode{reduce_image_series}{compute_scan_reductions}
+
+\api[\texttt{save\_reduced\_hdf5}, \texttt{main}]{\texttt{save\_reduced\_hdf5(output\_path, global\_min, global\_max, global\_mean, metadata)}, \texttt{main()}}
+Writes the three images (gzip level 4) and the metadata (master file, scan number and title,
+number of files) as root attributes. \fn{main} wires the steps together.
+\pycode{reduce_image_series}{save_reduced_hdf5}
+\pycode{reduce_image_series}{main}
+\pycode{reduce_image_series}{_tail}
+
+%------------------------------------------------------------------------------------------
+\subsection{\texttt{make\_dynamic\_mosaic}: region-of-interest maps}
+%------------------------------------------------------------------------------------------
+
+\fn{python make_dynamic_mosaic.py master.h5 -s SCAN -rx X -ry Y [-w HWS] [-o DIR]} follows one
+region of interest (ROI) of the detector, a square of side $2\,\mathrm{hws}+1$ pixels centred
+on $(X, Y)$---usually around one Laue spot---through every frame of a mesh scan. It produces:
+\begin{itemize}[nosep]
+\item the \textbf{mosaic}: the ROIs tiled in the order of the scan grid, a real-space image of
+  how the spot changes across the sample;
+\item the \textbf{entropy} map: the Shannon entropy \citep{Shannon1948} of the normalised ROI
+  intensity, $H = -\sum_k p_k\ln p_k$ with $p_k = I_k/\sum I$. A sharp spot concentrates the
+  intensity in a few pixels (low $H$); a diffuse or split spot, or background only, spreads it
+  (high $H$, at most $\ln N_\mathrm{pixels}$ for a flat ROI);
+\item the \textbf{max-to-mean} ratio of each ROI, another sharpness indicator;
+\item the \textbf{centre of mass} of each ROI, $\bar x = \sum_k x_kI_k/\sum_k I_k$, as a
+  displacement from its mean over the map: the motion of a Laue spot on the detector follows
+  the local lattice orientation (and the deviatoric strain), so this vector field maps
+  rotations across the sample;
+\item the \textbf{total intensity} of the ROI, normalised by the monitor;
+\item the sharpest and the most diffuse ROI.
+\end{itemize}
+The arrays are saved in \fn{computed_metrics_scanNNNN.h5} and a six-panel figure in physical
+motor coordinates.
+
+\begin{hyp}
+\begin{itemize}[nosep,leftmargin=1em]
+\item The ROI is fixed in detector pixels and must lie entirely inside the frame (a negative
+  start index gives an empty slice); the spot must stay inside it over the whole map.
+\item No background is subtracted: a flat background raises the entropy and pulls the centre
+  of mass towards the ROI centre.
+\item Displacements are in detector pixels, not converted into angles or strain.
+\item Points never recorded (aborted scan) become empty blocks, and their motor positions
+  are extrapolated from a plane fitted to the recorded ones.
+\end{itemize}
+\end{hyp}
+
+\pycode{make_dynamic_mosaic}{_header}
+
+\api[\texttt{parse\_args}]{\texttt{parse\_args()}}
+The master file, \fn{-s/--scan}, \fn{-rx/--roi_x}, \fn{-ry/--roi_y}, \fn{-w/--hws} (half
+window, default 5), \fn{--image_suffix}, \fn{-o/--output_dir}.
+\pycode{make_dynamic_mosaic}{parse_args}
+
+\api[\texttt{read\_image}, \texttt{roi\_slices}, \texttt{get\_image\_roi}]{\texttt{read\_image(filepath)}, \texttt{roi\_slices(roi\_x, roi\_y, hws)}, \texttt{get\_image\_roi(filepath, roi\_x, roi\_y, hws)}}
+Fallback readers for scans whose master file gives no direct access to the frames (TIFF
+files, or HDF5 files at \fn{/entry_0000/CRGIF/eiger4m/data}, first frame); \fn{roi_slices}
+returns the (row, column) slices of the ROI.
+\pycode{make_dynamic_mosaic}{read_image}
+\pycode{make_dynamic_mosaic}{roi_slices}
+\pycode{make_dynamic_mosaic}{get_image_roi}
+
+\api[\texttt{\_init\_worker}, \texttt{\_read\_roi\_batch}, \texttt{read\_rois}]{\texttt{\_init\_worker(scan)}, \texttt{\_read\_roi\_batch(indices, roi)}, \texttt{read\_rois(scan, roi, batch=50)}}
+Frames are read through the master file with \fn{BlissScan.iter_frames}, which reads only the
+ROI from disk. The scan object is sent once to each worker process (pool initialiser, global
+\fn{_WORKER_SCAN}), and each task reads a batch of 50 frames with the file opened once. Returns
+the ROIs of every recorded frame in acquisition order.
+\pycode{make_dynamic_mosaic}{_init_worker}
+\pycode{make_dynamic_mosaic}{_read_roi_batch}
+\pycode{make_dynamic_mosaic}{read_rois}
+
+\api[\texttt{fill\_missing\_positions}, \texttt{to\_scan\_grid}]{\texttt{fill\_missing\_positions(grid)}, \texttt{to\_scan\_grid(rois, index\_grid)}}
+\fn{fill_missing_positions} replaces the NaN positions of unrecorded points by a plane
+$a + b\,i + c\,j$ fitted (least squares) to the recorded positions, since plotting functions
+refuse NaN coordinates. \fn{to_scan_grid} orders the ROIs like the grid through the scan's
+\fn{index_grid} (which handles back-and-forth meshes), with zero blocks for missing points.
+\pycode{make_dynamic_mosaic}{fill_missing_positions}
+\pycode{make_dynamic_mosaic}{to_scan_grid}
+
+\api[\texttt{compute\_pipeline\_data}]{\texttt{compute\_pipeline\_data(array\_list, grid\_shape)}}
+All metrics in vectorised form. The mosaic is built by reshaping the stack of blocks to
+$(n_\mathrm{rows}, n_\mathrm{cols}, h, w)$, swapping the two middle axes and reshaping to
+$(n_\mathrm{rows}h, n_\mathrm{cols}w)$. Empty blocks get zero entropy, max-to-mean and
+displacement, and are ignored when looking for the sharpest block. Returns a dictionary of
+arrays.
+\pycode{make_dynamic_mosaic}{compute_pipeline_data}
+
+\api[\texttt{save\_metrics\_to\_hdf5}, \texttt{plot\_and\_save\_figure}]{\texttt{save\_metrics\_to\_hdf5(data, output\_path)}, \texttt{plot\_and\_save\_figure(data, x\_grid, y\_grid, mon\_grid, motor\_names, output\_path)}}
+The HDF5 archive (gzip), and the figure: mosaic in physical extent, sharpest and most diffuse
+ROI, entropy map, monitor-normalised intensity, and the centre-of-mass vector field (one arrow
+in two on dense grids).
+\pycode{make_dynamic_mosaic}{save_metrics_to_hdf5}
+\pycode{make_dynamic_mosaic}{plot_and_save_figure}
+
+\api[\texttt{main}]{\texttt{main()}}
+Reads the scan and the monitor, chooses as horizontal axis the motor whose name contains
+``x'' (transposing the grids if it is the slow motor, so that the mosaic is drawn with $x$
+horizontal), reads the ROIs (through the master file, or file by file), computes, saves and
+plots.
+\pycode{make_dynamic_mosaic}{main}
+\pycode{make_dynamic_mosaic}{_tail}

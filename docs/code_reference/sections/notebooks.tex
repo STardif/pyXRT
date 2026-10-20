@@ -1,0 +1,46 @@
+%==========================================================================================
+\section{Notebooks}\label{sec:notebooks}
+%==========================================================================================
+
+The notebooks chain the modules into complete analyses. They are not documented function by
+function: each is organised in numbered sections with explanations, and its settings are
+gathered in its first cells. Table~\ref{tab:notebooks} summarises what each one does and which
+functions it relies on.
+
+\begin{table}[h]
+\centering\small
+\caption{Notebooks of the repository.}
+\label{tab:notebooks}
+\begin{tabularx}{\textwidth}{@{}l X@{}}
+\toprule
+Notebook & Content and main functions \\
+\midrule
+\fn{fluo_analysis_clean.ipynb} & The white-beam workflow on a BLISS mesh scan:
+\fn{BlissScan}; normalisation (\fn{normalise_spectra}), map-averaged spectrum and counting
+error; peak scouting (\fn{identify_peaks}); BM32 beam from the scan (\fn{bm32_from_h5}),
+detector and sample matrix (\fn{MatrixModel}); internal energy calibration starting from the
+C10 calibration; pile-up and escape peaks; line groups and constrained fit
+(\fn{element_line_groups}, \fn{fit_average_spectrum}); sensitivity to the element list;
+resolution stability (\fn{width_window}, \fn{peak_width_profile}, \fn{detect_steps},
+\fn{fit_segments}); per-pixel maps (\fn{fit_map}) with quality report, individual pixel
+fits, quantitative ratios (\fn{quantify_layer}, \fn{atom_ratio}) and closure tests. \\
+\fn{fluo_analysis.ipynb} & Earlier version of the same workflow, kept with its outputs. It
+does not include the internal calibration step. \\
+\fn{xrf_energy_calibration.ipynb} & Energy calibration on the AXO RF C10 reference
+(\fn{calibrate}, \fn{plot_calibration}), with the beamline settings read from the scan, the
+fitted air path, line checks and intensity check, comparison with the calibration in use, and
+a JSON record that the analysis notebooks read as their starting calibration. \\
+\fn{xrf_mono_spectrum.ipynb} & A spectrum excited by a monochromatised Mo tube (the PyMca
+training spectrum \fn{XRFSpectrum.mca}, not distributed with the repository; see the PyMca
+tutorial): calibration from two peaks (\fn{calibration_from_peaks}), peak scouting, first-pass
+residuals revealing Tl and Pb, full fit up to the elastic peak with detector tails and the
+impulse-approximation Compton peak (\fn{ScatterSource}, \fn{fit_tails}), rejected candidates,
+and concentrations from the Co internal standard. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\paragraph{Results files.} The notebooks write their results to \fn{processed/}: fit records
+(JSON), average spectra and maps (NPZ), and figures. The fit records hold the calibration, the
+detector parameters, every fitted parameter with its error and the group areas, so that later
+notebooks can start from them.

@@ -1,0 +1,333 @@
+%==========================================================================================
+\section{\texttt{xrf\_beamline}: the incident spectrum}\label{sec:beamline}
+%==========================================================================================
+
+\subsection{Overview}
+
+Under white-beam (Laue) illumination every element is excited by the whole incident
+spectrum $\Phi(E)$, and the relative intensities of its fluorescence lines---not only its
+total signal---depend on the shape of that spectrum: each L or M subshell is ionised only by
+photons above its own edge, and those edges can be kilo-electronvolts apart (Ir: L$_3$ at
+11.22\,keV, L$_1$ at 13.42\,keV). The module computes $\Phi(E)$ at the sample from first
+principles: the synchrotron radiation of a bending magnet \citep{Schwinger1949,Kim1989},
+accepted through the apertures of the beamline, and filtered by grazing-incidence mirrors
+\citep{Parratt1954,Nevot1980}, beryllium windows and the air path. It also provides narrow
+``monochromatic'' spectra for tube or monochromator excitation, and the air model used by
+the detector-efficiency calculation of \fn{xrf_fit}.
+
+The quantities returned by \fn{Beamline.spectrum} are fluxes per mrad of horizontal angle
+and per 0.1\,\% bandwidth; only their \emph{shape} matters for line ratios and for the
+matrix corrections, but the absolute scale is correct (photons/s) for a given ring current.
+
+\begin{hyp}
+\begin{itemize}[nosep,leftmargin=1em]
+\item Bending-magnet radiation of a filament electron beam (no emittance, no energy spread);
+  the horizontal fan is uniform, so horizontal apertures scale the flux but not the spectrum.
+\item Mirrors: specular s-polarised Fresnel reflectivity of a homogeneous coating of nominal
+  density, with an optional N\'evot--Croce roughness factor; no slope errors, no thermal
+  deformation, no contamination layer. Bent mirrors act as thin cylindrical lenses in the
+  paraxial approximation.
+\item Windows and air: Beer--Lambert attenuation with total cross-sections; dry air, ideal
+  gas.
+\item The BM32 defaults (magnetic field 0.86\,T, Ir coatings, $2\times500$\,\textmu m Be,
+  3.3\,m of air, element positions) were confirmed in October 2026; mirror roughness is
+  unknown (0) and the KB grazing angles are not recorded in the scan files (3\,mrad).
+\end{itemize}
+\end{hyp}
+
+\pycode{xrf_beamline}{_header}
+
+\subsection{Source}
+
+\api[\texttt{BendingMagnetSource}]{\texttt{BendingMagnetSource(ring\_energy\_gev=6.04, magnetic\_field\_t=0.86, current\_a=0.2)}}
+Synchrotron radiation of a bending magnet. The defaults describe the BM32 source on ESRF-EBS.
+\begin{args}
+\item[ring\_energy\_gev] electron energy $E_e$ (6.04\,GeV for EBS).
+\item[magnetic\_field\_t] dipole field $B$; sets the critical energy, to which the high-energy
+  end of the spectrum is exponentially sensitive.
+\item[current\_a] ring current $I$, in amperes.
+\end{args}
+\blk{Physics} The critical energy and the Lorentz factor are
+\begin{equation}
+  E_c\,[\mathrm{keV}] = 0.665\,E_e^2[\mathrm{GeV}]\,B[\mathrm{T}], \qquad
+  \gamma = \frac{E_e}{m_e c^2} \approx 11\,820 ,
+\end{equation}
+giving $E_c = 20.9$\,keV for BM32. With $y = E/E_c$, the flux integrated over the vertical
+opening angle, per mrad of horizontal angle and per 0.1\,\% bandwidth, is \citep{Kim1989}
+\begin{equation}
+  \frac{\dd N}{\dd\theta} = 2.457\times10^{13}\,E_e[\mathrm{GeV}]\,I[\mathrm{A}]\;G_1(y),
+  \qquad G_1(y) = y\int_y^\infty K_{5/3}(x)\,\dd x ,
+  \label{eq:g1}
+\end{equation}
+and the angular density at vertical angle $\psi$, per mrad$^2$, with $X = \gamma\psi$ and
+$\xi = \tfrac{y}{2}(1+X^2)^{3/2}$, is
+\begin{equation}
+  \frac{\dd^2 N}{\dd\theta\,\dd\psi} = 1.327\times10^{13}\,E_e^2\,I\;y^2(1+X^2)^2
+  \left[K_{2/3}^2(\xi) + \frac{X^2}{1+X^2}K_{1/3}^2(\xi)\right],
+  \label{eq:angular}
+\end{equation}
+where the first term is the horizontally ($\sigma$) polarised part and the second the
+vertically ($\pi$) polarised part. On axis it reduces to $1.327\times10^{13}E_e^2 I\,H_2(y)$
+with $H_2(y) = y^2K_{2/3}^2(y/2)$. The vertical opening angle is of order $1/\gamma =
+85$\,\textmu rad, and wider for soft photons, so an aperture that accepts only a few
+\textmu rad selects the harder on-axis spectrum.
+\pycode{xrf_beamline}{BendingMagnetSource}
+
+\api[\texttt{critical\_energy\_kev}, \texttt{gamma} ; \texttt{\_g1}]{\texttt{critical\_energy\_kev}, \texttt{gamma} (properties); \texttt{\_g1(y)} (static)}
+$E_c$ and $\gamma$ as above. \fn{_g1} evaluates $G_1(y)$ by adaptive quadrature of
+$K_{5/3}$ (\fn{scipy.special.kv}) from $y$ to infinity; it returns 0 for $y\le0$ and for
+$y>50$, where $G_1 < 10^{-20}$.
+\pycode{xrf_beamline}{BendingMagnetSource.critical_energy_kev}
+\pycode{xrf_beamline}{BendingMagnetSource.gamma}
+\pycode{xrf_beamline}{BendingMagnetSource._g1}
+
+\api[\texttt{spectral\_flux}]{\texttt{spectral\_flux(energies\_kev)}}
+Eq.~\eqref{eq:g1} on an energy grid (keV): photons/s/mrad(horizontal)/0.1\,\%\,BW, integrated
+over the vertical angle. Returns an array of the grid's size.
+\pycode{xrf_beamline}{BendingMagnetSource.spectral_flux}
+
+\api[\texttt{angular\_flux}]{\texttt{angular\_flux(energies\_kev, psi\_urad)}}
+Eq.~\eqref{eq:angular}: photons/s/mrad$^2$/0.1\,\%\,BW, both polarisations, on a grid of
+energies and vertical angles (\textmu rad). Returns an array of shape $(n_E, n_\psi)$.
+Bessel functions that overflow or underflow far from the axis are set to zero.
+\pycode{xrf_beamline}{BendingMagnetSource.angular_flux}
+
+\api[\texttt{accepted\_flux}]{\texttt{accepted\_flux(energies\_kev, vertical\_acceptance\_urad=None, vertical\_offset\_urad=0.0, n\_angles=41)}}
+Flux per mrad (horizontal) per 0.1\,\%\,BW inside the vertical window
+$\psi_0 \pm \Delta\psi/2$: the trapezoidal integral of Eq.~\eqref{eq:angular} over
+\fn{n_angles} angles, converted from \textmu rad to mrad. \fn{None} (or a non-finite value)
+returns the full integral, Eq.~\eqref{eq:g1}. For $\Delta\psi \ll 1/\gamma$ the result is the
+on-axis spectrum times $\Delta\psi$.
+\pycode{xrf_beamline}{BendingMagnetSource.accepted_flux}
+
+\subsection{Optical elements}
+
+\api[\texttt{Mirror}]{\texttt{Mirror(material, density\_g\_cm3, grazing\_angle\_mrad, roughness\_nm=0.0, label="", distance\_m=None, length\_m=None, plane="vertical", bending\_radius\_m=inf, image\_distance\_m=None, angle\_spread\_mrad=0.0)}}
+A grazing-incidence mirror. Its spectral effect is the reflectivity; if it is positioned
+(\fn{distance_m} and \fn{length_m}), its footprint also acts as an aperture; if it is bent,
+it focuses the beam divergence; if it is a focusing (KB) mirror, its grazing angle varies
+along the footprint.
+\begin{args}
+\item[material, density\_g\_cm3] coating, e.g. \fn{"Ir"}, 22.56.
+\item[grazing\_angle\_mrad] angle between the beam and the surface, $\theta$.
+\item[roughness\_nm] r.m.s. roughness $\sigma$ (N\'evot--Croce factor; 0 disables it).
+\item[distance\_m, length\_m] distance from the source and optical length.
+\item[plane] \fn{"vertical"} or \fn{"horizontal"}: deflection plane.
+\item[bending\_radius\_m] meridional radius $R$ (\fn{inf} for a flat mirror).
+\item[image\_distance\_m] distance $q$ to the focus of a focusing mirror.
+\item[angle\_spread\_mrad] half-range of grazing angles over the illuminated footprint;
+  filled in by \fn{Beamline.resolved_optics} from \fn{image_distance_m}.
+\end{args}
+\pycode{xrf_beamline}{Mirror}
+\pycode{xrf_beamline}{Mirror.__post_init__}
+
+\api[\texttt{focal\_length\_m}, \texttt{aperture\_m}]{\texttt{focal\_length\_m}, \texttt{aperture\_m} (properties)}
+A cylindrically bent mirror of radius $R$ at grazing angle $\theta$ focuses in its
+deflection plane with focal length $f = R\sin\theta/2$ (the meridional Coddington equation
+at grazing incidence). The footprint of length $L$ accepts a beam of size $L\sin\theta$.
+\pycode{xrf_beamline}{Mirror.focal_length_m}
+\pycode{xrf_beamline}{Mirror.aperture_m}
+
+\api[\texttt{Mirror.transfer}, \texttt{Mirror.\_reflectivity}]{\texttt{Mirror.transfer(energies\_kev)}, \texttt{Mirror.\_reflectivity(energies\_kev, angle\_mrad)}}
+\blk{Physics} With the complex refractive index $n = 1-\delta+i\beta$ of the coating (xraylib
+\fn{Refractive_Index_Re} and \fn{_Im}), the s-polarised Fresnel amplitude at grazing angle
+$\theta$ is \citep{Parratt1954,AlsNielsen2011}
+\begin{equation}
+  r_s = \frac{\sin\theta - q}{\sin\theta + q}, \qquad q = \sqrt{n^2-\cos^2\theta},
+  \qquad R = |r_s|^2 .
+\end{equation}
+Total external reflection holds below the critical angle $\theta_c \approx \sqrt{2\delta}$;
+since $\delta\propto E^{-2}$, a mirror at fixed angle cuts off above $E_c^\mathrm{mirror}
+\propto 1/\theta$ (for Ir, $\delta = 3.4\times10^{-5}$ at 10\,keV, so $\theta_c = 8.3$\,mrad at
+10\,keV and the edge of reflection at 3\,mrad lies near 27\,keV). Roughness multiplies the
+\emph{amplitude} by $\exp(-2k_{z0}k_{z1}\sigma^2)$ \citep{Nevot1980}, with $k_{z0} =
+k_0\sin\theta$ and $k_{z1} = k_0 q$, so the intensity factor is
+$\exp(-4k_0^2\sin\theta\,\Re(q)\,\sigma^2)$; below the critical angle $\Re q \ll \sin\theta$
+and the factor tends to 1, while well above it the Debye--Waller form
+$\exp(-4k_{z0}^2\sigma^2)$ is recovered. Synchrotron radiation is polarised in the orbit
+plane and the mirrors of BM32 deflect vertically, so s-polarisation is the relevant case
+(at mrad angles both polarisations give the same result anyway).
+
+\fn{transfer} returns $R(E)$, averaged uniformly over 21 angles in $\theta \pm$
+\fn{angle_spread_mrad} if a spread is set. Energies where xraylib has no data get $n=1$.
+\pycode{xrf_beamline}{Mirror.transfer}
+\pycode{xrf_beamline}{Mirror._reflectivity}
+
+\api[\texttt{Filter}; \texttt{transfer}]{\texttt{Filter(material, density\_g\_cm3, thickness\_um, label="")}; \texttt{transfer(energies\_kev)}}
+A slab (window, filter, air path) with Beer--Lambert transmission
+$T(E) = \exp[-(\mu/\rho)(E)\,\rho\,t]$, using the total mass attenuation coefficient of the
+compound (\fn{CS_Total_CP}: photoabsorption plus coherent and incoherent scattering, since any
+interaction removes the photon from the beam). Energies without data are fully absorbed.
+\pycode{xrf_beamline}{Filter}
+\pycode{xrf_beamline}{Filter.__post_init__}
+\pycode{xrf_beamline}{Filter.transfer}
+
+\api[\texttt{Slit}; \texttt{transfer}]{\texttt{Slit(distance\_m, vertical\_gap\_mm=None, horizontal\_gap\_mm=None, label="")}; \texttt{transfer}}
+A pair of slits: an aperture without spectral effect (\fn{transfer} returns ones). A gap of
+\fn{None} is open.
+\pycode{xrf_beamline}{Slit}
+\pycode{xrf_beamline}{Slit.__post_init__}
+\pycode{xrf_beamline}{Slit.transfer}
+
+\subsection{Monochromatic sources and units}
+
+\api[\texttt{tube\_lines}]{\texttt{tube\_lines(anode, lines=("KL3", "KL2"))}}
+Energies (eV) and relative intensities of X-ray tube anode lines, by default the K$\alpha_1$/
+K$\alpha_2$ doublet that a crystal or multilayer monochromator passes (\fn{tube_lines("Mo")}:
+17\,479 and 17\,374\,eV). The intensities are the radiative rates (\fn{RadRate}), normalised
+to sum 1; this is correct for lines that share the same initial vacancy, such as K$\alpha_1$
+and K$\alpha_2$. The constant \fn{OpticalElement}, the union type of the optics, precedes it
+in the file.
+\begin{hyp}
+The monochromator passes both lines with the same efficiency and suppresses K$\beta$ and the
+bremsstrahlung completely.
+\end{hyp}
+\pycode{xrf_beamline}{tube_lines}
+
+\api[\texttt{monochromatic\_spectrum}]{\texttt{monochromatic\_spectrum(energies\_ev, weights=(1.0,), width\_ev=5.0, step\_ev=1.0)}}
+Builds a narrow incident spectrum from Gaussian lines of standard deviation \fn{width_ev},
+for the functions that expect an incident spectrum (\fn{element_line_groups},
+\fn{MatrixModel}). The density per eV, normalised so that each line has area $w_i$, is
+converted to the per-0.1\,\% bandwidth convention, $N_{0.1\%} = 10^{-3}E\,\dd N/\dd E$.
+\blk{Returns} \texttt{(energy\_kev, flux\_per\_0.1\%BW)} on a grid from $8\sigma$ below the lowest to
+$8\sigma$ above the highest line.
+\begin{hyp}
+The width only has to be resolved by the grid; its value does not matter as long as the
+cross-sections vary slowly across it (true away from absorption edges). With
+\fn{MatrixModel}, pass \fn{sf_step_kev = step_ev/1000}: its secondary-fluorescence grid is
+decimated to 40\,eV by default, which would miss a 5\,eV-wide line.
+\end{hyp}
+\pycode{xrf_beamline}{monochromatic_spectrum}
+
+\api[\texttt{per\_unit\_energy}]{\texttt{per\_unit\_energy(energies\_kev, flux\_01bw)}}
+Eq.~\eqref{eq:per-energy}: per-0.1\,\% bandwidth flux to a density per keV. Integrals over
+$\dd E$ (flux-weighted cross-sections) must use this form.
+\pycode{xrf_beamline}{per_unit_energy}
+
+\subsection{Air}
+
+\api[\texttt{AIR\_FORMULA}, \texttt{air\_density}]{\texttt{AIR\_FORMULA}, \texttt{air\_density(temperature\_c=20.0, pressure\_hpa=1013.25)}}
+Dry air is written as an atom-count formula from its volume composition (N$_2$ 78.084\,\%,
+O$_2$ 20.946\,\%, Ar 0.934\,\%, CO$_2$ 0.0417\,\%): $\mathrm{N}_{156.168}\mathrm{O}_{41.975}
+\mathrm{Ar}_{0.934}\mathrm{C}_{0.0417}$ per 100 molecules, which reproduces the mass fractions
+N 75.5\,\%, O 23.2\,\%, Ar 1.29\,\%. Its density follows the ideal-gas law,
+\begin{equation}
+  \rho = \frac{P\,M}{R\,T}, \qquad M = 28.9647\ \mathrm{g/mol},
+\end{equation}
+returned in g/cm$^3$ (1.204\,mg/cm$^3$ at 20\,\textdegree C and 1013.25\,hPa).
+\begin{hyp}
+Humidity is neglected. Moist air is slightly lighter than dry air, so at 50\,\% relative
+humidity and 20\,\textdegree C this overestimates density and absorption by a few parts per
+thousand \citep{Picard2008}. The pressure is the local value: about 990\,hPa at the ESRF,
+2.5\,\% below the sea-level standard.
+\end{hyp}
+\pycode{xrf_beamline}{air_density}
+
+\api[\texttt{air\_path}]{\texttt{air\_path(length\_m, temperature\_c=20.0, pressure\_hpa=1013.25)}}
+A \fn{Filter} of air of the given length. A long air path is the strongest low-energy filter
+of a white-beam line: 3\,m transmit about $10^{-7}$ at 5\,keV, 1.7\,\% at 8\,keV and 12\,\% at
+10\,keV.
+\pycode{xrf_beamline}{air_path}
+
+\subsection{The assembled beamline}
+
+\api[\texttt{Beamline}]{\texttt{Beamline(source, optics=[], sample\_distance\_m=None, vertical\_acceptance="auto", vertical\_offset\_urad=0.0, settings=\{\})}}
+A source and a list of optical elements. The elements with a position act as apertures
+(slits through their gaps, mirrors through their footprint); \fn{acceptance} maps each of them
+back to an angle at the source, and the smallest vertical one sets the window of source
+angles whose spectrum is used.
+\begin{args}
+\item[source] a \fn{BendingMagnetSource}.
+\item[optics] mirrors, filters and slits. Positions come from \fn{distance_m}; the order of
+  the list only sets the order of labels and transfers.
+\item[sample\_distance\_m] source--sample distance (for \fn{trace} and \fn{describe}).
+\item[vertical\_acceptance] \fn{"auto"} (from the apertures), \fn{"full"} (vertically
+  integrated spectrum, Eq.~\eqref{eq:g1}) or a number (full acceptance in \textmu rad).
+\item[vertical\_offset\_urad] centre of the accepted window relative to the orbit plane.
+\item[settings] free-form provenance (motor positions read from a scan).
+\end{args}
+\pycode{xrf_beamline}{Beamline}
+
+\api[\texttt{\_positioned}, \texttt{trace}]{\texttt{\_positioned()}, \texttt{trace(plane="vertical")}}
+Paraxial ray tracing. A ray leaves the source on axis with unit angle; at each positioned
+element its height $h$ (per radian of source angle, in m/rad) is accumulated, and every
+mirror bent in \fn{plane} changes the ray angle by $-h/f$ (thin concave lens). Returns
+\fn{[(element, h), ...]} in order of distance, plus \fn{(None, h_sample)} if the sample
+distance is set. The height per unit source angle is what converts an aperture into an
+angular acceptance at the source.
+\pycode{xrf_beamline}{Beamline._positioned}
+\pycode{xrf_beamline}{Beamline.trace}
+
+\api[\texttt{acceptance}]{\texttt{acceptance()}}
+For each plane and each aperture, the full angular acceptance at the source in \textmu rad,
+$\Delta\psi = s/h$ with $s$ the gap or the mirror's $L\sin\theta$. Returns
+\texttt{\{"vertical": \{limits, acceptance\_urad, limited\_by\}, "horizontal": \{...\}\}}, with
+infinite acceptance when nothing limits a plane.
+\pycode{xrf_beamline}{Beamline.acceptance}
+
+\api[\texttt{effective\_vertical\_acceptance}]{\texttt{effective\_vertical\_acceptance()}}
+The acceptance actually used for the spectrum: \fn{None} for \fn{"full"} or when no aperture
+limits the beam, the computed value for \fn{"auto"}, or the number given.
+\pycode{xrf_beamline}{Beamline.effective_vertical_acceptance}
+
+\api[\texttt{resolved\_optics}]{\texttt{resolved\_optics()}}
+Returns the optics with the grazing-angle spread of each focusing mirror filled in. An
+elliptical mirror receives nearly parallel rays from the distant source and sends them
+converging to the focus at distance $q$; across an illuminated beam of size $s$ the outgoing
+direction varies by $s/q$, so the grazing angle varies by
+\begin{equation}
+  \Delta\theta = \pm\frac{s}{4q}
+\end{equation}
+\citep{Kirkpatrick1948}. $s$ is the accepted angle in the mirror's plane times the height per
+angle at the mirror, capped by the mirror's own aperture. The reflectivity is then averaged
+over this range, which smooths the high-energy cut-off.
+\pycode{xrf_beamline}{Beamline.resolved_optics}
+
+\api[\texttt{describe}]{\texttt{describe()}}
+A dictionary summarising the geometry: vertical and horizontal acceptances and the aperture
+limiting each, every aperture's limit, the KB angle spreads, the height per \textmu rad at
+each element, the acceptance and offset used.
+\pycode{xrf_beamline}{Beamline.describe}
+
+\api[\texttt{spectrum}, \texttt{spectral\_density}, \texttt{band\_limits}]{\texttt{spectrum(energies\_kev)}, \texttt{spectral\_density(energies\_kev)}, \texttt{band\_limits(energies\_kev, frac=0.01)}}
+\fn{spectrum} returns \fn{(raw, transmitted, transfers)}: the accepted source flux, the flux at
+the sample (the product of every mirror and filter transfer), and the list of
+\fn{(label, transfer)}, all per mrad and per 0.1\,\%\,BW. \fn{spectral_density} converts the
+transmitted flux to photons/s/mrad/keV. \fn{band_limits} gives the energies where the
+transmitted flux first and last exceeds \fn{frac} of its maximum---a compact statement of the
+usable band (about 5--25\,keV on BM32).
+\pycode{xrf_beamline}{Beamline.spectrum}
+\pycode{xrf_beamline}{Beamline.spectral_density}
+\pycode{xrf_beamline}{Beamline.band_limits}
+
+\subsection{BM32}
+
+\api[\texttt{BM32\_LAYOUT}, \texttt{BM32\_WHITE\_BEAM}]{\texttt{BM32\_LAYOUT}, \texttt{BM32\_WHITE\_BEAM(air\_path\_m=3.3, temperature\_c=20.0, pressure\_hpa=1013.25, current\_a=0.2, magnetic\_field\_t=0.86, *, vg1=0.3, hg1=0.2, vg2=None, hg2=None, vg3=0.2, hg3=0.2, m1\_angle\_mrad=3.062, m2\_angle\_mrad=2.551, m1\_radius\_km=71.4, m2\_radius\_km=145.7, kbv\_angle\_mrad=3.0, kbh\_angle\_mrad=3.0, kb\_angle\_spread=True, vertical\_acceptance="auto", vertical\_offset\_urad=0.0)}}
+The BM32 white-beam model. \fn{BM32_LAYOUT} holds the distances from the source (m) of the
+primary slits s1 (26.368), the bent Ir mirrors m1 (28.309) and m2 (31.732), the guard slits s2
+(35.370), the slits s3 that define the KB illumination (44.485), the KB mirrors (vertical
+44.645, horizontal 44.880) and the sample (45.0), and the mirror lengths. The function builds:
+s1; m1 and m2 (Ir, 22.56\,g/cm$^3$, bent); two 500\,\textmu m Be windows; s2; s3; KB-V and KB-H
+(Ir, focusing, with angle spread if \fn{kb_angle_spread}); and the incident air path.
+\begin{args}
+\item[air\_path\_m] incident air path (3.3\,m measured on BM32); 0 removes it. Not to be
+  confused with the sample--detector path of the detector model.
+\item[vg1 \dots\ hg3] slit gaps (mm), motors of the same names; \fn{None} = open.
+\item[m1\_angle\_mrad, m2\_angle\_mrad, m1\_radius\_km, m2\_radius\_km] mirror angles
+  (motors \fn{ma1}, \fn{ma2}) and bending radii (\fn{mc1}, \fn{mc2}).
+\item[kbv\_angle\_mrad, kbh\_angle\_mrad] KB grazing angles, not recorded in the scan files.
+\item[others] as in \fn{Beamline} and \fn{BendingMagnetSource}.
+\end{args}
+With the default slits the vertical acceptance is a few \textmu rad, set by s3: the sample sees
+the on-axis spectrum, which raised the Ga/As sensitivity ratio by 4.5\,\% on the 2026 maps
+compared with the vertically integrated spectrum.
+\pycode{xrf_beamline}{BM32_WHITE_BEAM}
+
+\api[\texttt{bm32\_from\_h5}]{\texttt{bm32\_from\_h5(h5\_path, scan=None, **overrides)}}
+The BM32 beamline with the settings recorded in a BLISS scan: slit gaps
+(\fn{vg1 hg1 vg2 hg2 vg3 hg3}), mirror angles (\fn{ma1 ma2}) and radii (\fn{mc1 mc2}) from
+\fn{<scan>/instrument/positioners}, and the ring current from
+\fn{<scan>/instrument/machine/current} (mA, converted to A). Missing or non-numeric values
+(BLISS writes \fn{ERR} for disconnected motors) keep their defaults with a warning; keyword
+arguments override anything. The source file and scan are stored in \fn{settings}.
+\pycode{xrf_beamline}{bm32_from_h5}
