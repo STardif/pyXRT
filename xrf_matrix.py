@@ -64,7 +64,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Union
+from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import xraylib
@@ -146,6 +146,116 @@ class Geometry:
     @property
     def sin_out(self) -> float:
         return float(np.sin(np.radians(self.takeoff_deg)))
+
+
+@dataclass(frozen=True)
+class LabGeometry:
+    """Beam, detector and sample stage in the laboratory; angles on a tilted facet.
+
+    Laboratory frame: ``X`` along the incident beam (horizontal), ``Z`` up,
+    ``Y = Z x X``.  The nominal sample surface contains the horizontal axis
+    perpendicular to the beam and makes ``surface_angle_deg`` with the beam,
+    facing it from above; its outward normal is
+    ``n0 = (-sin s, 0, cos s)``.
+
+    Stage frame (BM32 ``xech``, ``yech``, ``zech``): ``x`` and ``y`` lie in the
+    nominal surface, ``z = n0`` is its outward normal, and the frame is
+    right-handed.  ``y`` is the in-surface direction in the incidence plane:
+    with ``y_upstream`` (BM32), ``+y`` points upstream and down,
+    ``-(cos s, 0, sin s)``, so ``x = y x z = +Y``.
+
+    Detector: the direction from the sample to the detector, at
+    ``detector_azimuth_deg`` from the beam in the horizontal plane (seen from
+    above, on the ``+x`` side if ``detector_on_plus_x``) and
+    ``detector_elevation_deg`` above it.  For a horizontal detector the
+    azimuth is the scattering angle 2theta.
+
+    A facet is described by its height along ``z`` as a plane over the stage
+    axes, ``z = a x + b y + c`` (the plane used on BM32 to align the ``sx``,
+    ``sy`` frame, see :func:`xrf_region.facet_plane`); its outward normal is
+    ``(-a, -b, 1)`` in the stage frame.  :meth:`facet` returns the incidence
+    and take-off angles on that facet as a :class:`Geometry`.
+
+    Parameters
+    ----------
+    surface_angle_deg : float
+        Angle between the beam and the nominal surface (40 deg on BM32): the
+        nominal incidence angle.
+    detector_azimuth_deg : float
+        Horizontal angle between the beam and the detector direction; > 90 deg
+        for a detector looking back toward the source side.
+    detector_elevation_deg : float
+        Angle of the detector direction above the horizontal plane.
+    y_upstream : bool
+        ``+y`` (``yech``) points upstream (its horizontal projection is
+        opposite to the beam), as on BM32.
+    detector_on_plus_x : bool
+        The detector is on the ``+x`` side (``+xech`` moves the sample toward
+        it), as on BM32.
+    """
+
+    surface_angle_deg: float = 40.0
+    detector_azimuth_deg: float = 120.0
+    detector_elevation_deg: float = 0.0
+    y_upstream: bool = True
+    detector_on_plus_x: bool = True
+
+    # ------------------------------------------------------------ lab vectors
+    @property
+    def beam(self) -> np.ndarray:
+        """Unit propagation direction of the incident beam, lab frame."""
+        return np.array([1.0, 0.0, 0.0])
+
+    def stage_axes(self) -> np.ndarray:
+        """Rows: the stage unit vectors x, y, z in the lab frame."""
+        s = np.radians(self.surface_angle_deg)
+        z = np.array([-np.sin(s), 0.0, np.cos(s)])
+        y = (-1.0 if self.y_upstream else 1.0) * np.array([np.cos(s), 0.0, np.sin(s)])
+        x = np.cross(y, z)
+        return np.array([x, y, z])
+
+    @property
+    def detector(self) -> np.ndarray:
+        """Unit direction from the sample to the detector, lab frame."""
+        phi, eps = np.radians(self.detector_azimuth_deg), np.radians(self.detector_elevation_deg)
+        x_lab_y = self.stage_axes()[0][1]                  # +x of the stage along +Y or -Y
+        side = np.sign(x_lab_y) * (1.0 if self.detector_on_plus_x else -1.0)
+        return np.array([np.cos(eps) * np.cos(phi), side * np.cos(eps) * np.sin(phi), np.sin(eps)])
+
+    @property
+    def scattering_angle_deg(self) -> float:
+        """Angle between the incident beam and the detector direction (2theta)."""
+        return float(np.degrees(np.arccos(np.clip(self.beam @ self.detector, -1.0, 1.0))))
+
+    # ------------------------------------------------------------ angles
+    def facet_normal(self, a: float = 0.0, b: float = 0.0) -> np.ndarray:
+        """Outward unit normal, lab frame, of the facet ``z = a x + b y + c``."""
+        n = np.array([-a, -b, 1.0]) @ self.stage_axes()
+        return n / np.linalg.norm(n)
+
+    def angles(self, normal: np.ndarray) -> Tuple[float, float]:
+        """(incidence, take-off) in degrees from a surface of outward ``normal``."""
+        sin_in = -float(self.beam @ normal)
+        sin_out = float(self.detector @ normal)
+        if sin_in <= 0 or sin_out <= 0:
+            raise ValueError(f"beam or detector behind the surface (sin_in={sin_in:.3f}, "
+                             f"sin_out={sin_out:.3f}): check the geometry settings")
+        return float(np.degrees(np.arcsin(sin_in))), float(np.degrees(np.arcsin(sin_out)))
+
+    def nominal(self) -> Geometry:
+        """Angles on the nominal surface (no facet tilt)."""
+        return Geometry(*self.angles(self.facet_normal()))
+
+    def facet(self, a: float, b: float) -> Geometry:
+        """Angles on the facet ``z = a x + b y + c`` (slopes along the stage x and y)."""
+        return Geometry(*self.angles(self.facet_normal(a, b)))
+
+    @staticmethod
+    def tilt(a: float, b: float) -> Tuple[float, float, float]:
+        """Facet tilt from the slopes: (total tilt, tilt about y [slope along x],
+        tilt about x [slope along y]), degrees."""
+        return (float(np.degrees(np.arctan(np.hypot(a, b)))),
+                float(np.degrees(np.arctan(a))), float(np.degrees(np.arctan(b))))
 
 
 class Layer:

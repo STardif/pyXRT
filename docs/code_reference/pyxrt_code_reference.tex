@@ -142,14 +142,14 @@ Module & Lines & Role & Uses \\
 geometry, counters, MCA spectra, detector frames. & -- \\
 \fn{xrf_beamline} & 820 & Incident spectrum of a bending magnet through mirrors, windows,
 slits and air; BM32 model; monochromatic sources. & -- \\
-\fn{xrf_matrix} & 703 & Primary and secondary fluorescence in a stack of layers;
+\fn{xrf_matrix} & 813 & Primary and secondary fluorescence in a stack of layers; measurement angles on a tilted facet;
 self-consistent quantification of a layer. & \fn{xrf_beamline} \\
 \fn{xrf_fit} & 2494 & Spectrum model (line groups, detector response, escape, pile-up,
 scatter), fits of single spectra and of maps, diagnostics. & \fn{xrf_beamline},
 \fn{xrf_matrix} \\
 \fn{xrf_calibration} & 559 & Energy calibration on reference samples (AXO thin films) or on
 known peaks. & \fn{xrf_fit}, \fn{xrf_beamline} \\
-\fn{xrf_region} & 492 & Surface region of a map (facet of a crystal): polygons, pixel masks,
+\fn{xrf_region} & 538 & Surface region of a map (facet of a crystal): polygons, pixel masks, facet plane,
 interactive drawing in Jupyter. & -- \\
 \fn{reduce_image_series} & 266 & Pixel-wise minimum, maximum and mean of the detector frames
 of a scan (command line). & \fn{bliss_hdf5_reader} \\

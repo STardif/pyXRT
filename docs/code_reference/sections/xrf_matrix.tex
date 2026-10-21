@@ -122,6 +122,56 @@ measurement, since the path lengths scale as $1/\sin\psi$.
 \pycode{xrf_matrix}{Geometry.sin_in}
 \pycode{xrf_matrix}{Geometry.sin_out}
 
+\api[\texttt{LabGeometry}]{\texttt{LabGeometry(surface\_angle\_deg=40.0, detector\_azimuth\_deg=120.0, detector\_elevation\_deg=0.0, y\_upstream=True, detector\_on\_plus\_x=True)}}
+The measurement angles from the positions of the beam, the detector and the sample stage in the
+laboratory, so that they can be computed for a surface that is not the nominal one, such as a
+crystal facet. Laboratory frame: $X$ along the beam (horizontal), $Z$ up, $Y = Z\times X$. The
+nominal surface makes the angle $s$ (\fn{surface_angle_deg}) with the beam and contains the
+horizontal axis perpendicular to it; its outward normal is $\hat{\mathbf n}_0 = (-\sin s, 0,
+\cos s)$. The stage axes (\fn{xech}, \fn{yech}, \fn{zech} on BM32) form a right-handed frame
+with $\hat{\mathbf z} = \hat{\mathbf n}_0$ and $\hat{\mathbf y}$ in the surface and in the
+incidence plane; on BM32 $+\hat{\mathbf y}$ points upstream and down,
+$\hat{\mathbf y} = -(\cos s, 0, \sin s)$, so $\hat{\mathbf x} = \hat{\mathbf y}\times\hat{\mathbf z}
+= +\hat Y$, toward the detector. The detector direction is
+$\hat{\mathbf d} = (\cos\varepsilon\cos\varphi,\ \pm\cos\varepsilon\sin\varphi,\ \sin\varepsilon)$
+with $\varphi$ the horizontal angle from the beam (\fn{detector_azimuth_deg}, the scattering
+angle $2\theta$ for a horizontal detector) and $\varepsilon$ the elevation, on the
+$+\hat{\mathbf x}$ side if \fn{detector_on_plus_x}.
+
+A facet described as the plane $z = ax + by + c$ over the stage axes has the outward normal
+$\hat{\mathbf n} \propto -a\hat{\mathbf x} - b\hat{\mathbf y} + \hat{\mathbf z}$
+(\fn{facet_normal}), and
+\begin{equation}
+  \sin\psi_\mathrm{in} = -\hat{\mathbf k}\cdot\hat{\mathbf n}, \qquad
+  \sin\psi_\mathrm{out} = \hat{\mathbf d}\cdot\hat{\mathbf n},
+\end{equation}
+with $\hat{\mathbf k}$ the beam direction (\fn{angles}; an error is raised if the beam or the
+detector is behind the surface). \fn{nominal} and \fn{facet} return the corresponding
+\fn{Geometry}; \fn{tilt} converts the slopes to angles. For a horizontal detector the nominal
+take-off is $\arcsin(\sin s\,|\cos 2\theta|)$: about 13, 19 and 27\textdegree{} at $2\theta =
+110$, 120 and 135\textdegree{} for $s = 40$\textdegree, never 40\textdegree. On a facet, a slope
+along $y$ (in the incidence plane) mostly changes $\psi_\mathrm{in}$, a slope along $x$ (toward
+the detector) mostly changes $\psi_\mathrm{out}$.
+\begin{hyp}
+\begin{itemize}[nosep,leftmargin=1em]
+\item The beam is horizontal and the nominal surface is tilted about the horizontal axis
+  perpendicular to it (the BM32 Laue geometry); the stage frame is right-handed with
+  \fn{zech} along the outward normal.
+\item Point geometry: the beam footprint and the detector solid angle are small, so one pair of
+  angles describes the whole measurement.
+\end{itemize}
+\end{hyp}
+\pycode{xrf_matrix}{LabGeometry}
+\pycode{xrf_matrix}{LabGeometry.beam}
+\pycode{xrf_matrix}{LabGeometry.stage_axes}
+\pycode{xrf_matrix}{LabGeometry.detector}
+\pycode{xrf_matrix}{LabGeometry.scattering_angle_deg}
+\pycode{xrf_matrix}{LabGeometry.facet_normal}
+\pycode{xrf_matrix}{LabGeometry.angles}
+\pycode{xrf_matrix}{LabGeometry.nominal}
+\pycode{xrf_matrix}{LabGeometry.facet}
+\pycode{xrf_matrix}{LabGeometry.tilt}
+
 \api[\texttt{Layer}]{\texttt{Layer(composition, density\_g\_cm3, thickness\_um=None, name="")}}
 A homogeneous layer.
 \begin{args}
