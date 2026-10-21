@@ -57,6 +57,16 @@ been read, which \fn{BlissMeshScan.read_data} does by default); \texttt{"pixel"}
 (column, row) indices on the \fn{scan_shape} grid.
 \pycode{xrf_region}{scan_coordinates}
 
+\api[\texttt{facet\_plane}]{\texttt{facet\_plane(scan, motors=("xech", "yech", "zech"), mask=None)}}
+The plane $z = ax + by + c$ followed by the sample stage during a map, by least squares on the
+recorded positions of the three motors. On BM32, the map of a crystal is scanned in the
+\fn{sx}/\fn{sy} frame, which is built (\fn{initmat}) from a plane fitted on the facet before
+the map; the stage then follows that plane point by point and the fit returns the facet
+orientation in the stage frame (residual of a few nm), for \fn{LabGeometry.facet}. Returns
+\fn{a}, \fn{b}, \fn{c}, the residual \fn{rms_um}, the tilt \fn{tilt_deg} $= \arctan\sqrt{a^2+b^2}$
+and the number of points.
+\pycode{xrf_region}{facet_plane}
+
 \subsection{The region}
 
 \api[\texttt{SurfaceRegion}]{\texttt{SurfaceRegion(include=[], exclude=[], units="motor", motors=None, name="", note="")}}

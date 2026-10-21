@@ -102,6 +102,52 @@ def scan_coordinates(scan, units: str = "motor") -> Tuple[np.ndarray, np.ndarray
     return x, y
 
 
+def facet_plane(scan, motors: Tuple[str, str, str] = ("xech", "yech", "zech"),
+                mask: Optional[np.ndarray] = None) -> dict:
+    """Plane followed by the sample stage during a map: ``z = a x + b y + c``.
+
+    On BM32 the map of a crystal is scanned in a tilted frame (``sx``, ``sy``)
+    set up from a plane fitted on the facet (``plane_parameters`` in the
+    beamline script); the stage motors ``xech``, ``yech``, ``zech`` are
+    recorded at every point, so a least-squares plane through them gives back
+    that plane, hence the facet orientation in the stage frame, for
+    :meth:`xrf_matrix.LabGeometry.facet`.
+
+    Parameters
+    ----------
+    scan : BlissMeshScan
+        With the three motors read (``scan.read_data(extra_counters=[...])``).
+    motors : (x, y, z) motor names
+    mask : (n_pixels,) bool array, optional
+        Points used for the fit (default: all).
+
+    Returns
+    -------
+    dict
+        ``a``, ``b`` (slopes, dimensionless), ``c`` (mm), ``rms_um`` (residual
+        of the plane, µm: a few nm when the stage followed a plane; large if
+        ``zech`` was not moved along a plane), ``tilt_deg`` (angle of the facet
+        normal from the stage z axis) and ``n_points``.
+    """
+    try:
+        x, y, z = (np.asarray(scan.counters[m], dtype=float).ravel() for m in motors)
+    except KeyError as exc:
+        raise KeyError(f"motor {exc} not loaded: read it with scan.read_data(extra_counters="
+                       f"{list(motors)}); the scan may not record it.") from None
+    keep = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    if mask is not None:
+        keep &= np.asarray(mask, bool).ravel()
+    A = np.column_stack([x[keep], y[keep], np.ones(keep.sum())])
+    if keep.sum() < 3 or np.linalg.matrix_rank(A) < 3:
+        raise ValueError("Need points spread over two directions to fit a plane.")
+    coef, *_ = np.linalg.lstsq(A, z[keep], rcond=None)
+    a, b, c = (float(v) for v in coef)
+    rms = float(np.std(z[keep] - A @ coef)) * 1e3
+    return {"a": a, "b": b, "c": c, "rms_um": rms,
+            "tilt_deg": float(np.degrees(np.arctan(np.hypot(a, b)))),
+            "n_points": int(keep.sum())}
+
+
 @dataclass
 class SurfaceRegion:
     """Polygons defining the analysed surface of a map.
