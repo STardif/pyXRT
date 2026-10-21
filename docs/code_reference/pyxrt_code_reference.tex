@@ -144,11 +144,13 @@ geometry, counters, MCA spectra, detector frames. & -- \\
 slits and air; BM32 model; monochromatic sources. & -- \\
 \fn{xrf_matrix} & 703 & Primary and secondary fluorescence in a stack of layers;
 self-consistent quantification of a layer. & \fn{xrf_beamline} \\
-\fn{xrf_fit} & 2474 & Spectrum model (line groups, detector response, escape, pile-up,
+\fn{xrf_fit} & 2494 & Spectrum model (line groups, detector response, escape, pile-up,
 scatter), fits of single spectra and of maps, diagnostics. & \fn{xrf_beamline},
 \fn{xrf_matrix} \\
 \fn{xrf_calibration} & 559 & Energy calibration on reference samples (AXO thin films) or on
 known peaks. & \fn{xrf_fit}, \fn{xrf_beamline} \\
+\fn{xrf_region} & 492 & Surface region of a map (facet of a crystal): polygons, pixel masks,
+interactive drawing in Jupyter. & -- \\
 \fn{reduce_image_series} & 266 & Pixel-wise minimum, maximum and mean of the detector frames
 of a scan (command line). & \fn{bliss_hdf5_reader} \\
 \fn{make_dynamic_mosaic} & 358 & Region of interest of every frame of a mesh: mosaic,
@@ -175,6 +177,7 @@ retarder scans (SPEC era). & \fn{spec_reader} \\
 \node[mod=blue!8, right=of beam] (matrix) {xrf\_matrix};
 \node[mod=blue!8, right=of matrix] (fit) {xrf\_fit};
 \node[mod=blue!8, right=of fit] (cal) {xrf\_calibration};
+\node[mod=blue!8, below=4mm of cal] (reg) {xrf\_region};
 \node[mod=green!8, below=12mm of beam, xshift=10mm] (bliss) {bliss\_hdf5\_reader};
 \node[mod=green!8, right=of bliss] (red) {reduce\_image\_series};
 \node[mod=green!8, right=of red] (mos) {make\_dynamic\_mosaic};
@@ -271,6 +274,7 @@ since they hold much of the physics.
 \input{sections/xrf_matrix.tex}
 \input{sections/xrf_fit.tex}
 \input{sections/xrf_calibration.tex}
+\input{sections/xrf_region.tex}
 \input{sections/image_scripts.tex}
 \input{sections/legacy.tex}
 \input{sections/notebooks.tex}

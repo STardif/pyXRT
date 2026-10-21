@@ -1876,6 +1876,7 @@ def fit_map(
     pileup: Optional[np.ndarray] = None,
     segments: Optional[np.ndarray] = None,
     width_correction: bool = False,
+    mask: Optional[np.ndarray] = None,
 ) -> MapResult:
     """Solve the fixed-shape model for every pixel of a map, in one pass.
 
@@ -1928,6 +1929,11 @@ def fit_map(
         ``MapResult.width_change``.  First order: valid for changes of a few
         per cent, and assumes the relative group amplitudes stay close to
         those of ``shape_params``.  Can be combined with ``segments``.
+    mask : (n_pixels,) bool array, optional
+        Pixels to solve, e.g. the facet of a crystal from
+        :meth:`xrf_region.SurfaceRegion.scan_mask`.  The others are not
+        fitted and are NaN in every map, so map statistics (medians,
+        histograms, worst pixels) only see the region.  Default: all pixels.
 
     Returns
     -------
@@ -1944,6 +1950,11 @@ def fit_map(
     n_pix, n_ch = raw.shape
 
     good = np.isfinite(s) & (s > 0)
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool).reshape(-1)
+        if mask.size != n_pix:
+            raise ValueError(f"mask has {mask.size} values for {n_pix} pixels.")
+        good &= mask
     s_safe = np.where(good, s, 1.0)
     y = raw / s_safe[:, None]
 
@@ -1953,7 +1964,7 @@ def fit_map(
             raise ValueError("shape_params given per segment: pass `segments` too.")
         seg = np.asarray(segments)
         shapes = {lab: np.asarray(p, dtype=float) for lab, p in shape_params.items()}
-        missing = set(np.unique(seg)) - set(shapes)
+        missing = set(np.unique(seg[good])) - set(shapes)
         if missing:
             raise ValueError(f"no shape parameters for segments {sorted(missing)}")
     else:
@@ -1971,7 +1982,7 @@ def fit_map(
     width_change = np.full(n_pix, np.nan) if width_correction else None
 
     for lab, params in shapes.items():
-        sel = np.flatnonzero(seg == lab)
+        sel = np.flatnonzero((seg == lab) & good)       # invalid or masked pixels: not solved
         if sel.size == 0:
             continue
         ys = y[sel]
@@ -2162,7 +2173,7 @@ def segment_labels(steps: Sequence[int], n_bins: int, bin_size: int,
 def fit_segments(corrected: np.ndarray, raw_spectra: np.ndarray, scale: np.ndarray,
                  segments: np.ndarray, groups: Sequence[LineGroup], calibration: Calibration,
                  detector: Detector, roi: Tuple[int, int], pileup: Optional[np.ndarray] = None,
-                 **fit_kw) -> Dict[int, FitResult]:
+                 mask: Optional[np.ndarray] = None, **fit_kw) -> Dict[int, FitResult]:
     """Average-spectrum fit of every segment, each with its own resolution.
 
     The segment's average spectrum, counting error and (if ``pileup`` is
@@ -2170,13 +2181,22 @@ def fit_segments(corrected: np.ndarray, raw_spectra: np.ndarray, scale: np.ndarr
     :func:`fit_average_spectrum` is run with ``fit_kw`` (``yerr`` and
     ``pileup_template`` are replaced).  Feed ``{label: r.popt}`` to
     :func:`fit_map` together with the same ``segments``.
+
+    With ``mask`` (per-pixel booleans, e.g. the facet of a crystal), only the
+    pixels inside it enter each segment's average; a segment without any such
+    pixel is skipped (and needs no shape in :func:`fit_map` with the same mask).
     """
     fit_kw = dict(fit_kw)
     fit_kw.pop("yerr", None)
     tmpl_given = fit_kw.pop("pileup_template", None)
     out = {}
+    segments = np.asarray(segments)
+    keep = np.ones(segments.size, bool) if mask is None else np.asarray(mask, bool).reshape(-1)
     for lab in np.unique(segments):
-        idx = np.flatnonzero(segments == lab)
+        idx = np.flatnonzero((segments == lab) & keep)
+        if idx.size == 0:
+            logger.info("segment %s has no pixel inside the mask: skipped", lab)
+            continue
         a_s, _, _ = average_spectrum(corrected[idx])
         e_s = counting_error(raw_spectra[idx], scale[idx])
         tmpl = tmpl_given

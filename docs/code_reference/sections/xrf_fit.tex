@@ -695,7 +695,7 @@ group with unit amplitude (\fn{group_profile} with all other amplitudes set to 0
 $(n_\mathrm{channels}, n_\mathrm{bkg}+n_\mathrm{groups})$ array.
 \pycode{xrf_fit}{design_matrix}
 
-\api[\texttt{fit\_map}]{\texttt{fit\_map(raw\_spectra, scale, model, shape\_params, map\_shape, poisson\_weights=True, clip\_negative=False, pileup=None, segments=None, width\_correction=False)}}
+\api[\texttt{fit\_map}]{\texttt{fit\_map(raw\_spectra, scale, model, shape\_params, map\_shape, poisson\_weights=True, clip\_negative=False, pileup=None, segments=None, width\_correction=False, mask=None)}}
 Solves the fixed-shape model for every pixel.
 \begin{args}
 \item[raw\_spectra] raw counts $(n_\mathrm{pixels}, n_\mathrm{channels})$: the weights are
@@ -714,6 +714,9 @@ Solves the fixed-shape model for every pixel.
 \item[segments] per-pixel segment labels, with \fn{shape_params} per segment: each segment
   is solved with its own widths, the exact treatment of an abrupt resolution change.
 \item[width\_correction] add one first-order width term per pixel (below).
+\item[mask] pixels to solve, e.g. the facet of a crystal (\fn{SurfaceRegion.scan_mask},
+  section~\ref{sec:region}); the others are not fitted and are NaN in every map, so that map
+  statistics (medians, histograms, worst pixels) only see the region. Default: all pixels.
 \end{args}
 \blk{Method} For each pixel $p$ with design matrix $\mathbf A$ and weights $\mathbf W_p$, the
 weighted least-squares solution and its covariance are
@@ -768,12 +771,13 @@ are returned (a new level starts at each index). Slow drifts are better handled 
 term of \fn{fit_map}.
 \pycode{xrf_fit}{detect_steps}
 
-\api[\texttt{segment\_labels}, \texttt{fit\_segments}]{\texttt{segment\_labels(steps, n\_bins, bin\_size, n\_pixels=None)}, \texttt{fit\_segments(corrected, raw\_spectra, scale, segments, groups, calibration, detector, roi, pileup=None, **fit\_kw)}}
+\api[\texttt{segment\_labels}, \texttt{fit\_segments}]{\texttt{segment\_labels(steps, n\_bins, bin\_size, n\_pixels=None)}, \texttt{fit\_segments(corrected, raw\_spectra, scale, segments, groups, calibration, detector, roi, pileup=None, mask=None, **fit\_kw)}}
 \fn{segment_labels} turns step positions (in bins) into a label per pixel (0, 1, \dots), the
 last incomplete bin taking the last label. \fn{fit_segments} fits the average spectrum of
 each segment, with its own counting error and pile-up template, and returns
 \texttt{\{label: FitResult\}}; \texttt{\{label: r.popt\}} then goes to \fn{fit_map} with the same
-segments.
+segments. With \fn{mask}, only the pixels inside it enter each segment's average, and a
+segment without any of them is skipped.
 \pycode{xrf_fit}{segment_labels}
 \pycode{xrf_fit}{fit_segments}
 
