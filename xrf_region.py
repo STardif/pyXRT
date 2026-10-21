@@ -432,11 +432,14 @@ class RegionSelector:
         self._patches: list = []
         self._title()
 
-        self.selector = PolygonSelector(self.ax, self._on_polygon, useblit=True,
+        # No blitting: ipympl does not reliably refresh blitted artists, so the
+        # polygon would be recorded but never shown. Full redraws are fast enough.
+        self.selector = PolygonSelector(self.ax, self._on_polygon, useblit=False,
                                         props=dict(color="w", lw=1.5),
-                                        handle_props=dict(markersize=5, mfc="w", mec="k"))
+                                        handle_props=dict(markersize=6, mfc="w", mec="k"))
         self._current: Optional[np.ndarray] = None
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
+        self.fig.canvas.mpl_connect("button_release_event", lambda _e: self._update_status())
         self._redraw()
         self._show()
 
@@ -472,7 +475,12 @@ class RegionSelector:
     def _update_status(self):
         if hasattr(self, "_status"):
             m = self.mask
-            self._status.value = (f"<tt>{len(self._include)} facet polygon(s), "
+            if self._current is not None:
+                drawing = f"polygon closed ({len(self._current)} vertices): press Add"
+            else:
+                n = max(len(self.selector.verts), 0) if hasattr(self, "selector") else 0
+                drawing = f"drawing: {n} vertices" if n else "click on the map to start a polygon"
+            self._status.value = (f"<tt>{drawing} | {len(self._include)} facet polygon(s), "
                                   f"{len(self._exclude)} exclusion(s): "
                                   f"{int(m.sum())} / {m.size} pixels selected</tt>")
 
@@ -490,6 +498,7 @@ class RegionSelector:
     # ------------------------------------------------------------- callbacks
     def _on_polygon(self, verts):
         self._current = np.asarray(verts, dtype=float)
+        self._update_status()
 
     def _on_key(self, event):
         if event.key == "a":
