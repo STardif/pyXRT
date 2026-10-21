@@ -1,0 +1,140 @@
+%==========================================================================================
+\section{\texttt{xrf\_region}: surface region of a map}\label{sec:region}
+%==========================================================================================
+
+\subsection{Overview}
+
+A thin film covers the whole map, and every pixel belongs to the same flat surface. A single
+crystal glued on the holder does not: the map shows a central flat facet, neighbouring facets
+at other tilts, the glue and the holder. A facet tilted by $\delta$ changes the incidence and
+take-off angles by up to $\delta$, and with them the absorption paths of every line
+(section~\ref{sec:matrix}); its intensities and line ratios therefore differ from those of the
+central facet even at the same composition. Only the facet whose orientation is known (on
+BM32, the plane fitted to align the \fn{sx}/\fn{sy} frame) belongs in the average spectrum and
+the quantification.
+
+The module describes that facet as a \fn{SurfaceRegion}: polygons that are included, minus
+polygons that are excluded (an inclusion, a dust grain, a crack). The region gives a boolean
+mask over the pixels, which the notebook applies to the average spectrum, the pile-up template,
+the per-segment fits (\fn{fit_segments}) and the map solve (\fn{fit_map}, argument
+\fn{mask}). The vertices can be typed in, or drawn on the map with \fn{RegionSelector}, and
+saved to a small JSON file.
+
+\begin{hyp}
+\begin{itemize}[nosep,leftmargin=1em]
+\item A pixel belongs to the region when its \emph{centre} (the recorded motor positions of
+  the point) is inside; the beam footprint is not considered, so pixels along an edge mix two
+  facets whichever side they fall on. Drawing the polygon slightly inside the facet avoids them.
+\item Motor units are the recorded positions of the fast and slow motors of the mesh, read
+  point by point: they do not depend on the grid and remain valid for another map of the same
+  facet in the same frame. They are only meaningful in the frame they were drawn in, so the
+  motor names are stored and checked.
+\item Points exactly on an edge may fall on either side (\fn{Path.contains_points}). In pixel
+  units with integer vertices, the pixel centres lie on the edges: shift the vertices by half
+  a pixel to make the choice explicit.
+\end{itemize}
+\end{hyp}
+
+\pycode{xrf_region}{_header}
+
+\subsection{Polygons and coordinates}
+
+\api[\texttt{polygon\_area}, \texttt{points\_in\_polygon}]{\texttt{polygon\_area(vertices)}, \texttt{points\_in\_polygon(x, y, vertices)}}
+\fn{_as_polygon} checks and normalises a list of vertices to an $(n,2)$ array (a repeated
+closing vertex is dropped, at least three distinct vertices are required).
+\fn{polygon_area} is the shoelace formula,
+$A = \tfrac12\left|\sum_i (x_i y_{i+1} - y_i x_{i+1})\right|$.
+\fn{points_in_polygon} returns, for each point, whether it is inside the polygon, from
+\fn{matplotlib.path.Path.contains_points} (even--odd rule).
+\pycode{xrf_region}{_as_polygon}
+\pycode{xrf_region}{polygon_area}
+\pycode{xrf_region}{points_in_polygon}
+
+\api[\texttt{scan\_coordinates}]{\texttt{scan\_coordinates(scan, units="motor")}}
+The $(x, y)$ = (fast, slow) coordinates of every pixel of a mesh scan, as flat arrays in
+acquisition order. \texttt{"motor"}: the recorded positions of the two motors (they must have
+been read, which \fn{BlissMeshScan.read_data} does by default); \texttt{"pixel"}: the
+(column, row) indices on the \fn{scan_shape} grid.
+\pycode{xrf_region}{scan_coordinates}
+
+\subsection{The region}
+
+\api[\texttt{SurfaceRegion}]{\texttt{SurfaceRegion(include=[], exclude=[], units="motor", motors=None, name="", note="")}}
+\begin{args}
+\item[include] polygons whose pixels are kept; empty means the whole map.
+\item[exclude] polygons whose pixels are removed from the included ones.
+\item[units] \texttt{"motor"} or \texttt{"pixel"} (see above).
+\item[motors] the (fast, slow) motor names, checked against the scan by \fn{scan_mask}.
+\item[name, note] free text, kept in the JSON file.
+\end{args}
+\pycode{xrf_region}{SurfaceRegion}
+\pycode{xrf_region}{SurfaceRegion.__post_init__}
+
+\api[constructors]{\texttt{SurfaceRegion.from\_vertices(vertices, units="motor", exclude=(), **kw)}, \texttt{SurfaceRegion.coerce(region)}}
+\fn{from_vertices} makes a region of one polygon, the usual case of one facet. \fn{coerce}
+accepts what a notebook configuration naturally contains: \texttt{None} (the whole map), a
+\fn{SurfaceRegion}, the path of a JSON file, a dictionary of keyword arguments, or a list of
+vertices in motor units.
+\pycode{xrf_region}{SurfaceRegion.from_vertices}
+\pycode{xrf_region}{SurfaceRegion.coerce}
+
+\api[\texttt{mask}, \texttt{scan\_mask}]{\texttt{is\_full}, \texttt{mask(x, y)}, \texttt{scan\_mask(scan)}, \texttt{area()}}
+\fn{mask} is true for the points inside any included polygon and inside no excluded one;
+\fn{scan_mask} applies it to the pixels of a scan (a flat $(n_\mathrm{pixels},)$ array, all
+true for the whole map) and warns when the motors differ from those the region was drawn with,
+or when no pixel is selected. \fn{area} is the included minus the excluded polygon areas
+(overlaps are not resolved), in mm$^2$ or pixels.
+\pycode{xrf_region}{SurfaceRegion.is_full}
+\pycode{xrf_region}{SurfaceRegion.mask}
+\pycode{xrf_region}{SurfaceRegion.scan_mask}
+\pycode{xrf_region}{SurfaceRegion.area}
+\pycode{xrf_region}{SurfaceRegion.__str__}
+
+\api[\texttt{plot}]{\texttt{plot(ax, origin=(0, 0), scale=1.0, include\_kw=None, exclude\_kw=None)}}
+Draws the outlines (included: solid white, excluded: dashed red) at
+$(\mathbf v - \mathbf o)\,s$, so that they can be laid over a map drawn in other units, e.g.
+\textmu m from the corner of the map with \fn{origin} the minimum motor positions and
+$s = 1000$.
+\pycode{xrf_region}{SurfaceRegion.plot}
+
+\api[input/output]{\texttt{to\_dict()}, \texttt{save(path, **metadata)}, \texttt{SurfaceRegion.load(path)}, \texttt{to\_code(precision=5)}}
+The region is saved as JSON (units, motors, vertices; extra metadata such as the scan file are
+stored alongside and ignored on reading). \fn{to_code} prints a Python expression recreating
+it, to paste into a notebook configuration.
+\pycode{xrf_region}{SurfaceRegion.to_dict}
+\pycode{xrf_region}{SurfaceRegion.save}
+\pycode{xrf_region}{SurfaceRegion.load}
+\pycode{xrf_region}{SurfaceRegion.to_code}
+
+\subsection{Drawing a region}
+
+\api[\texttt{map\_image}]{\texttt{map\_image(corrected, calibration=None, window\_ev=None)}}
+The per-pixel image to draw on: the sum of the normalised spectra, over an energy window if
+given. A strong line of the crystal shows the facets best, since their intensity depends on
+the local angles.
+\pycode{xrf_region}{map_image}
+
+\api[\texttt{RegionSelector}]{\texttt{RegionSelector(scan, image, units="motor", region=None, name="", log=False, cmap="viridis", figsize=(7.0, 6.2))}}
+An interactive map built on Matplotlib's \fn{PolygonSelector}. It needs an interactive backend:
+\texttt{\%matplotlib widget} (ipympl) in Jupyter, where buttons are added with ipywidgets, or a
+Qt/Tk window in a script. The user clicks the vertices of the facet and closes the polygon on
+the first vertex; vertices can then be dragged, or the whole polygon with \texttt{shift}.
+\textbf{Add facet} (key \texttt{a}) adds it to the region, \textbf{Add exclusion} (key
+\texttt{x}) to the exclusions, \textbf{Undo} (\texttt{u}) removes the last one, \textbf{Clear
+all} returns to the whole map. Pixels outside the current region are veiled in grey and the
+number of selected pixels is shown, so what will be averaged is visible while drawing.
+\fn{region} and \fn{mask} return the result so far. With a non-interactive backend (inline)
+the map is still shown and a warning explains how to switch.
+\pycode{xrf_region}{RegionSelector}
+\pycode{xrf_region}{RegionSelector.__init__}
+\pycode{xrf_region}{RegionSelector._show}
+\pycode{xrf_region}{RegionSelector._title}
+\pycode{xrf_region}{RegionSelector._update_status}
+\pycode{xrf_region}{RegionSelector._redraw}
+\pycode{xrf_region}{RegionSelector._on_polygon}
+\pycode{xrf_region}{RegionSelector._on_key}
+\pycode{xrf_region}{RegionSelector.add}
+\pycode{xrf_region}{RegionSelector.undo}
+\pycode{xrf_region}{RegionSelector.clear}
+\pycode{xrf_region}{RegionSelector.region}
+\pycode{xrf_region}{RegionSelector.mask}

@@ -30,7 +30,7 @@ REPO = HERE.parents[1]
 OUT = HERE / "listings"
 
 MODULES = ["bliss_hdf5_reader", "xrf_beamline", "xrf_matrix", "xrf_fit", "xrf_calibration",
-           "reduce_image_series", "make_dynamic_mosaic", "fluo_map_fit", "spec_reader",
+           "xrf_region", "reduce_image_series", "make_dynamic_mosaic", "fluo_map_fit", "spec_reader",
            "xray_tools", "LiveFourierTransform"]
 
 

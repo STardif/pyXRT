@@ -16,8 +16,9 @@ functions it relies on.
 Notebook & Content and main functions \\
 \midrule
 \fn{fluo_analysis_clean.ipynb} & The white-beam workflow on a BLISS mesh scan:
-\fn{BlissScan}; normalisation (\fn{normalise_spectra}), map-averaged spectrum and counting
-error; peak scouting (\fn{identify_peaks}); BM32 beam from the scan (\fn{bm32_from_h5}),
+\fn{BlissScan}; normalisation (\fn{normalise_spectra}); surface region (the whole map for a
+film, a facet of a crystal: \fn{SurfaceRegion}, \fn{RegionSelector}); map-averaged spectrum and
+counting error; peak scouting (\fn{identify_peaks}); BM32 beam from the scan (\fn{bm32_from_h5}),
 detector and sample matrix (\fn{MatrixModel}); internal energy calibration starting from the
 C10 calibration; pile-up and escape peaks; line groups and constrained fit
 (\fn{element_line_groups}, \fn{fit_average_spectrum}); sensitivity to the element list;
