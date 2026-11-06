@@ -38,6 +38,10 @@ Conventions and caveats
   amperes.**  (Before Oct 2026 ``spectral_flux`` multiplied ``G1`` by the
   angular-density constant ``1.327e13 E^2 I``, a constant factor E/1.85 too
   high; irrelevant for ratios, wrong for absolute flux.)
+* **Absolute flux at the sample.**  ``Beamline.spectrum`` stays per mrad
+  (horizontal) per 0.1 % BW; ``Beamline.photon_flux`` multiplies by the
+  accepted horizontal fan (smallest horizontal aperture) and converts to
+  photons/s/eV, and ``Beamline.total_flux`` integrates it.
 * **Vertical acceptance.**  The photon beam of a bending magnet is
   ~1/gamma = 85 urad wide vertically at ESRF-EBS (FWHM 110-270 urad between 30
   and 5 keV), and softer photons spread wider.  When the beamline apertures
@@ -659,6 +663,38 @@ class Beamline:
         e = np.asarray(energies_kev, dtype=float)
         _, transmitted, _ = self.spectrum(e)
         return per_unit_energy(e, transmitted)
+
+    def horizontal_acceptance_mrad(self, horizontal_acceptance_urad: Optional[float] = None) -> float:
+        """Horizontal fan reaching the sample (mrad): the given value, else the
+        smallest horizontal aperture traced back to the source."""
+        a = (self.acceptance()["horizontal"]["acceptance_urad"]
+             if horizontal_acceptance_urad is None else float(horizontal_acceptance_urad))
+        if not np.isfinite(a) or a <= 0:
+            raise ValueError("No horizontal aperture limits the beam: give horizontal_acceptance_urad.")
+        return a * 1e-3
+
+    def photon_flux(self, energies_kev: np.ndarray,
+                    horizontal_acceptance_urad: Optional[float] = None) -> np.ndarray:
+        """Absolute spectral flux at the sample, photons/s/eV.
+
+        :meth:`spectral_density` (photons/s/mrad/keV, the vertical window already
+        integrated) times the accepted horizontal fan. A bending magnet emits
+        uniformly in the horizontal plane, so the flux through a horizontal
+        aperture is its angular width times the flux per mrad, whatever the
+        source size. Multiply by the count time for photons per point.
+
+        Absolute, unlike the line ratios, so it also depends on what cancels in
+        them: the slit gaps (their zero offsets matter at 0.1 mm), the ring
+        current, and ideal mirror reflectivities (no roughness or contamination).
+        """
+        e = np.asarray(energies_kev, dtype=float)
+        return self.spectral_density(e) * self.horizontal_acceptance_mrad(horizontal_acceptance_urad) * 1e-3
+
+    def total_flux(self, energies_kev: np.ndarray,
+                   horizontal_acceptance_urad: Optional[float] = None) -> float:
+        """Photons/s at the sample over the energy grid (integral of :meth:`photon_flux`)."""
+        e = np.asarray(energies_kev, dtype=float)
+        return float(trapezoid(self.photon_flux(e, horizontal_acceptance_urad), e * 1e3))
 
     def band_limits(self, energies_kev: np.ndarray, frac: float = 0.01) -> Tuple[float, float]:
         """Energies where the transmitted flux first and last exceed ``frac`` of its peak.

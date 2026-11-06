@@ -300,6 +300,34 @@ usable band (about 5--25\,keV on BM32).
 \pycode{xrf_beamline}{Beamline.spectral_density}
 \pycode{xrf_beamline}{Beamline.band_limits}
 
+\api[\texttt{photon\_flux}, \texttt{total\_flux}]{\texttt{horizontal\_acceptance\_mrad(horizontal\_acceptance\_urad=None)}, \texttt{photon\_flux(energies\_kev, horizontal\_acceptance\_urad=None)}, \texttt{total\_flux(energies\_kev, horizontal\_acceptance\_urad=None)}}
+The absolute spectrum at the sample, in photons/s/eV:
+\begin{equation}
+  \frac{\dd N}{\dd E}\bigg|_\mathrm{sample} = \frac{N_{0.1\%}(E)\,\Delta\theta_h}{10^{-3}E},
+\end{equation}
+with $N_{0.1\%}$ the transmitted flux of \fn{spectrum} (per mrad horizontal, already
+integrated over the accepted vertical window) and $\Delta\theta_h$ the accepted horizontal fan
+in mrad, the smallest horizontal aperture traced back to the source
+(\fn{horizontal_acceptance_mrad}) unless given. A bending magnet emits uniformly in the
+horizontal plane, so the flux through a horizontal aperture is its angular width times the flux
+per mrad, whatever the source size. \fn{total_flux} integrates it over the grid (photons/s);
+multiply by the count time for photons per point. On BM32 with s3 at
+$0.1\times0.1$\,mm$^2$ and 193\,mA this gives $2.3\times10^{11}$\,photons/s, about
+$1.5\times10^{7}$\,photons/s/eV at 18\,keV.
+\begin{hyp}
+\begin{itemize}[nosep,leftmargin=1em]
+\item The slit gaps read from the file are the true openings: a zero offset of 10\,\textmu m on a
+  0.1\,mm gap changes the flux by 10\,\% per plane. Ratios do not depend on them.
+\item Ideal mirror reflectivities (Fresnel; the BM32 roughness is unknown and left at 0, no
+  carbon contamination or figure errors) and nominal KB angles; everything that passes s3
+  reaches the sample. Roughness, contamination and losses after s3 can only lower the true
+  flux.
+\end{itemize}
+\end{hyp}
+\pycode{xrf_beamline}{Beamline.horizontal_acceptance_mrad}
+\pycode{xrf_beamline}{Beamline.photon_flux}
+\pycode{xrf_beamline}{Beamline.total_flux}
+
 \subsection{BM32}
 
 \api[\texttt{BM32\_LAYOUT}, \texttt{BM32\_WHITE\_BEAM}]{\texttt{BM32\_LAYOUT}, \texttt{BM32\_WHITE\_BEAM(air\_path\_m=3.3, temperature\_c=20.0, pressure\_hpa=1013.25, current\_a=0.2, magnetic\_field\_t=0.86, *, vg1=0.3, hg1=0.2, vg2=None, hg2=None, vg3=0.2, hg3=0.2, m1\_angle\_mrad=3.062, m2\_angle\_mrad=2.551, m1\_radius\_km=71.4, m2\_radius\_km=145.7, kbv\_angle\_mrad=3.0, kbh\_angle\_mrad=3.0, kb\_angle\_spread=True, vertical\_acceptance="auto", vertical\_offset\_urad=0.0)}}
