@@ -2007,8 +2007,12 @@ def fit_map(
         AtWA = np.einsum("ck,pc,cl->pkl", A, W, A, optimize=True)
         AtWy = np.einsum("ck,pc,pc->pk", A, W, ys, optimize=True)
         # Nudge the diagonal so an all-zero pixel does not make the solve singular;
-        # such pixels are flagged NaN below via `good`.
-        ridge = 1e-12 * np.trace(AtWA, axis1=1, axis2=2)[:, None, None] * np.eye(k)
+        # such pixels are flagged NaN below via `good`.  The nudge is relative to
+        # each diagonal entry: the columns differ in scale by many decades (the
+        # width column carries the full shape amplitudes), and a nudge scaled to
+        # the trace would shrink the unit-amplitude group columns (by ~4 % on GaAs).
+        diag = np.einsum("pkk->pk", AtWA)
+        ridge = 1e-12 * (diag + 1e-300)[:, :, None] * np.eye(k)
         c = np.linalg.solve(AtWA + ridge, AtWy[..., None])[..., 0]
         cov = np.linalg.inv(AtWA + ridge)
         coef[sel] = c
