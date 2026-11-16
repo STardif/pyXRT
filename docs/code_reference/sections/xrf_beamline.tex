@@ -27,10 +27,10 @@ matrix corrections, but the absolute scale is correct (photons/s) for a given ri
   density, with an optional N\'evot--Croce roughness factor; no slope errors, no thermal
   deformation, no contamination layer. Bent mirrors act as thin cylindrical lenses in the
   paraxial approximation.
-\item Windows and air: Beer--Lambert attenuation with total cross-sections; dry air, ideal
-  gas.
+\item Windows, air and N$_2$: Beer--Lambert attenuation with total cross-sections; dry air
+  and dry N$_2$, ideal gases.
 \item The BM32 defaults (magnetic field 0.86\,T, Ir coatings, $2\times500$\,\textmu m Be,
-  3.3\,m of air, element positions) were confirmed in October 2026; mirror roughness is
+  3.3\,m incident path of which 0.633\,m in dry N$_2$, element positions) were confirmed in October 2026; mirror roughness is
   unknown (0) and the KB grazing angles are not recorded in the scan files (3\,mrad).
 \end{itemize}
 \end{hyp}
@@ -229,6 +229,14 @@ of a white-beam line: 3\,m transmit about $10^{-7}$ at 5\,keV, 1.7\,\% at 8\,keV
 10\,keV.
 \pycode{xrf_beamline}{air_path}
 
+\api[\texttt{gas\_density}, \texttt{n2\_path}]{\texttt{gas\_density(molar\_mass\_g\_mol, temperature\_c=20.0, pressure\_hpa=1013.25)}, \texttt{n2\_path(length\_m, temperature\_c=20.0, pressure\_hpa=1013.25)}}
+\fn{gas_density} is the ideal-gas density above for any molar mass (\fn{air_density} calls
+it). \fn{n2_path} is a \fn{Filter} of pure, dry N$_2$ ($M = 28.0134$\,g/mol), for a flushed
+section of the beam path. Per metre it absorbs about 27\,\% less than air between 8 and
+15\,keV: air owes about 16\,\% of its absorption there to argon and 27\,\% to oxygen.
+\pycode{xrf_beamline}{gas_density}
+\pycode{xrf_beamline}{n2_path}
+
 \subsection{The assembled beamline}
 
 \api[\texttt{Beamline}]{\texttt{Beamline(source, optics=[], sample\_distance\_m=None, vertical\_acceptance="auto", vertical\_offset\_urad=0.0, settings=\{\})}}
@@ -330,16 +338,19 @@ $1.5\times10^{7}$\,photons/s/eV at 18\,keV.
 
 \subsection{BM32}
 
-\api[\texttt{BM32\_LAYOUT}, \texttt{BM32\_WHITE\_BEAM}]{\texttt{BM32\_LAYOUT}, \texttt{BM32\_WHITE\_BEAM(air\_path\_m=3.3, temperature\_c=20.0, pressure\_hpa=1013.25, current\_a=0.2, magnetic\_field\_t=0.86, *, vg1=0.3, hg1=0.2, vg2=None, hg2=None, vg3=0.2, hg3=0.2, m1\_angle\_mrad=3.062, m2\_angle\_mrad=2.551, m1\_radius\_km=71.4, m2\_radius\_km=145.7, kbv\_angle\_mrad=3.0, kbh\_angle\_mrad=3.0, kb\_angle\_spread=True, vertical\_acceptance="auto", vertical\_offset\_urad=0.0)}}
+\api[\texttt{BM32\_LAYOUT}, \texttt{BM32\_WHITE\_BEAM}]{\texttt{BM32\_LAYOUT}, \texttt{BM32\_WHITE\_BEAM(air\_path\_m=2.667, temperature\_c=20.0, pressure\_hpa=1013.25, current\_a=0.2, magnetic\_field\_t=0.86, *, n2\_path\_m=0.633, vg1=0.3, hg1=0.2, vg2=None, hg2=None, vg3=0.2, hg3=0.2, m1\_angle\_mrad=3.062, m2\_angle\_mrad=2.551, m1\_radius\_km=71.4, m2\_radius\_km=145.7, kbv\_angle\_mrad=3.0, kbh\_angle\_mrad=3.0, kb\_angle\_spread=True, vertical\_acceptance="auto", vertical\_offset\_urad=0.0)}}
 The BM32 white-beam model. \fn{BM32_LAYOUT} holds the distances from the source (m) of the
 primary slits s1 (26.368), the bent Ir mirrors m1 (28.309) and m2 (31.732), the guard slits s2
 (35.370), the slits s3 that define the KB illumination (44.485), the KB mirrors (vertical
 44.645, horizontal 44.880) and the sample (45.0), and the mirror lengths. The function builds:
 s1; m1 and m2 (Ir, 22.56\,g/cm$^3$, bent); two 500\,\textmu m Be windows; s2; s3; KB-V and KB-H
-(Ir, focusing, with angle spread if \fn{kb_angle_spread}); and the incident air path.
+(Ir, focusing, with angle spread if \fn{kb_angle_spread}); and the incident air and N$_2$ paths.
 \begin{args}
-\item[air\_path\_m] incident air path (3.3\,m measured on BM32); 0 removes it. Not to be
-  confused with the sample--detector path of the detector model.
+\item[air\_path\_m] incident path in ambient air: 2.667\,m on BM32 (3.3\,m measured, of
+  which 0.633\,m is flushed with N$_2$); 0 removes it. Not to be confused with the
+  sample--detector path of the detector model.
+\item[n2\_path\_m] incident path in pure, dry N$_2$ (0.633\,m on BM32), in addition to
+  \fn{air_path_m}, at the same temperature and pressure; 0 removes it.
 \item[vg1 \dots\ hg3] slit gaps (mm), motors of the same names; \fn{None} = open.
 \item[m1\_angle\_mrad, m2\_angle\_mrad, m1\_radius\_km, m2\_radius\_km] mirror angles
   (motors \fn{ma1}, \fn{ma2}) and bending radii (\fn{mc1}, \fn{mc2}).
