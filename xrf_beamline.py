@@ -72,7 +72,8 @@ Conventions and caveats
   polarised and the mirrors here deflect vertically, so s-polarisation is the
   relevant case; at grazing incidence the two are indistinguishable anyway.
 * The default BM32 configuration (0.86 T bending magnet, four Ir-coated
-  mirrors, two 500 um Be windows, 3.3 m measured incident air path, element
+  mirrors, two 500 um Be windows, 3.3 m measured incident path of which
+  0.633 m in dry N2 and 2.667 m in air, element
   positions in :data:`BM32_LAYOUT`) was confirmed in Oct 2026.  Mirror
   roughness is not known and is left at 0; the KB grazing angles are not
   recorded in the scan files and default to 3 mrad.  Use :func:`bm32_from_h5`
@@ -110,6 +111,8 @@ __all__ = [
     "air_path",
     "air_density",
     "AIR_FORMULA",
+    "n2_path",
+    "gas_density",
     "per_unit_energy",
 ]
 
@@ -438,8 +441,18 @@ AIR_FORMULA = "N156.168O41.975Ar0.934C0.0417"
 #: Molar mass of dry air, g/mol.
 AIR_MOLAR_MASS = 28.9647
 
+#: Molar mass of N2, g/mol.
+N2_MOLAR_MASS = 28.0134
+
 #: Molar gas constant, J/(mol K).
 GAS_CONSTANT = 8.31446261815324
+
+
+def gas_density(molar_mass_g_mol: float, temperature_c: float = 20.0,
+                pressure_hpa: float = 1013.25) -> float:
+    """Density of an ideal gas in g/cm^3, ``rho = P M / (R T)``."""
+    return (pressure_hpa * 100.0) * (molar_mass_g_mol * 1e-3) / (
+        GAS_CONSTANT * (temperature_c + 273.15)) * 1e-3
 
 
 def air_density(temperature_c: float = 20.0, pressure_hpa: float = 1013.25) -> float:
@@ -454,8 +467,7 @@ def air_density(temperature_c: float = 20.0, pressure_hpa: float = 1013.25) -> f
     ESRF (~210 m) the ambient pressure is nearer 990 hPa than 1013 hPa, which is
     a 2.5 % change in density and therefore in optical depth.
     """
-    return (pressure_hpa * 100.0) * (AIR_MOLAR_MASS * 1e-3) / (
-        GAS_CONSTANT * (temperature_c + 273.15)) * 1e-3
+    return gas_density(AIR_MOLAR_MASS, temperature_c, pressure_hpa)
 
 
 def air_path(length_m: float, temperature_c: float = 20.0,
@@ -478,6 +490,28 @@ def air_path(length_m: float, temperature_c: float = 20.0,
     return Filter(material=AIR_FORMULA, density_g_cm3=rho,
                   thickness_um=length_m * 1e6,
                   label=f"{length_m:g} m air ({temperature_c:g} C, {pressure_hpa:g} hPa)")
+
+
+def n2_path(length_m: float, temperature_c: float = 20.0,
+            pressure_hpa: float = 1013.25) -> Filter:
+    """A :class:`Filter` representing a path through pure, dry N2.
+
+    For a flushed section of the beam path.  Per metre, N2 absorbs ~27 % less
+    than air between 8 and 15 keV: it has no argon (1.3 % of the mass of air
+    but ~16 % of its absorption there) and no oxygen (~27 %, O absorbing more
+    than N per gram), partly made up by the extra nitrogen.
+
+    Parameters
+    ----------
+    length_m : float
+        Path length in metres.
+    temperature_c, pressure_hpa : float
+        Gas conditions, used to compute the density (a flushed tube is at
+        ambient pressure to within a few hPa).
+    """
+    rho = gas_density(N2_MOLAR_MASS, temperature_c, pressure_hpa)
+    return Filter(material="N2", density_g_cm3=rho, thickness_um=length_m * 1e6,
+                  label=f"{length_m:g} m N2 ({temperature_c:g} C, {pressure_hpa:g} hPa)")
 
 
 # =============================================================================
@@ -724,9 +758,9 @@ BM32_LAYOUT: Dict[str, float] = dict(
 )
 
 
-def BM32_WHITE_BEAM(air_path_m: float = 3.3, temperature_c: float = 20.0,
+def BM32_WHITE_BEAM(air_path_m: float = 2.667, temperature_c: float = 20.0,
                     pressure_hpa: float = 1013.25, current_a: float = 0.2,
-                    magnetic_field_t: float = 0.86, *,
+                    magnetic_field_t: float = 0.86, *, n2_path_m: float = 0.633,
                     vg1: Optional[float] = 0.3, hg1: Optional[float] = 0.2,
                     vg2: Optional[float] = None, hg2: Optional[float] = None,
                     vg3: Optional[float] = 0.2, hg3: Optional[float] = 0.2,
@@ -746,8 +780,9 @@ def BM32_WHITE_BEAM(air_path_m: float = 3.3, temperature_c: float = 20.0,
     Parameters
     ----------
     air_path_m : float
-        Length of the **incident** air path, in metres (3.3 m measured on
-        BM32).  Set to 0 to remove it.
+        Length of the **incident** path in ambient air, in metres.  On BM32
+        the incident path is 3.3 m long, of which 0.633 m is flushed with dry
+        N2 (``n2_path_m``), hence 2.667 m of air.  Set to 0 to remove it.
         This is the dominant low-energy filter on the line and it is what sets
         the ~5 keV lower bound of the usable band; the 1 mm of Be alone would
         pass energies well below that.
@@ -756,7 +791,10 @@ def BM32_WHITE_BEAM(air_path_m: float = 3.3, temperature_c: float = 20.0,
         window), which attenuates the *emitted* lines instead and belongs to a
         separate detector-response model.
     temperature_c, pressure_hpa : float
-        Ambient conditions for the air density.
+        Ambient conditions for the air density (also used for the N2).
+    n2_path_m : float
+        Length of the incident path in pure, dry N2, in metres (0.633 m on
+        BM32), in addition to ``air_path_m``.  Set to 0 to remove it.
     current_a : float
         Ring current in amperes (scales the absolute flux only).
     magnetic_field_t : float
@@ -797,6 +835,8 @@ def BM32_WHITE_BEAM(air_path_m: float = 3.3, temperature_c: float = 20.0,
     ]
     if air_path_m > 0:
         optics.append(air_path(air_path_m, temperature_c, pressure_hpa))
+    if n2_path_m > 0:
+        optics.append(n2_path(n2_path_m, temperature_c, pressure_hpa))
     return Beamline(
         source=BendingMagnetSource(ring_energy_gev=6.04, magnetic_field_t=magnetic_field_t, current_a=current_a),
         optics=optics, sample_distance_m=L["sample"],
@@ -804,7 +844,7 @@ def BM32_WHITE_BEAM(air_path_m: float = 3.3, temperature_c: float = 20.0,
         settings=dict(vg1=vg1, hg1=hg1, vg2=vg2, hg2=hg2, vg3=vg3, hg3=hg3, ma1=m1_angle_mrad,
                       ma2=m2_angle_mrad, mc1_km=m1_radius_km, mc2_km=m2_radius_km,
                       kbv_angle_mrad=kbv_angle_mrad, kbh_angle_mrad=kbh_angle_mrad,
-                      current_a=current_a, air_path_m=air_path_m),
+                      current_a=current_a, air_path_m=air_path_m, n2_path_m=n2_path_m),
     )
 
 
@@ -821,7 +861,7 @@ def bm32_from_h5(h5_path: Union[str, Path], scan: Optional[str] = None, **overri
     ``<scan>/instrument/positioners`` and the ring current from
     ``<scan>/instrument/machine/current`` (mA).  Values that are missing or not
     numeric (BLISS writes ``ERR`` for disconnected motors) keep their defaults,
-    with a warning.  Keyword arguments override anything, e.g. ``air_path_m``,
+    with a warning.  Keyword arguments override anything, e.g. ``air_path_m``, ``n2_path_m``,
     ``kbv_angle_mrad`` or ``vertical_acceptance``.
 
     Parameters
