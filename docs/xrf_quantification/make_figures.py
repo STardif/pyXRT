@@ -11,7 +11,8 @@ Usage (from the repository root or anywhere)::
 
     python docs/xrf_quantification/make_figures.py
 
-Needs the data file ``InPoSi_v2_center.h5`` at the repository root.
+Reads ``InPoSi_v2_center.h5`` at the repository root if it is there, else
+from the experiment's RAW_DATA folder (ihma907, 2026-09-09).
 """
 
 from __future__ import annotations
@@ -79,11 +80,28 @@ def greek(label):
 
 # ----------------------------------------------------------------------------- configuration
 H5 = ROOT / "InPoSi_v2_center.h5"
+if not H5.exists():
+    H5 = Path("/data/visitor/ihma907/bm32/20260909/RAW_DATA/InPoSi_v2/InPoSi_v2_center/InPoSi_v2_center.h5")
 MCA, MON, LT, RT = "xia_det0", "mon", "xia_det0_live_time", "xia_det0_elapsed_time"
-CAL = XF.Calibration(gain=10.032, offset=-31.263)
+# Same settings as fluo_analysis_clean.ipynb.  The detection geometry was calibrated on two
+# GaAs wafers in 2026-11 (GaAs_calibration.ipynb): detector at 2theta = 123.2 deg in the
+# horizontal plane (take-off 20.6 deg on a surface at 40 deg to the beam), 19.275 cm of air
+# (measured).  This map is from 2026-09: the detector is assumed not to have moved.
+AIR_TEMP_C, AIR_PRESS_HPA = 21.0, 1013.25
+BEAM_KW = dict(air_path_m=2.667, n2_path_m=0.633,          # 3.3 m incident path, 0.633 m of it in N2
+               temperature_c=AIR_TEMP_C, pressure_hpa=AIR_PRESS_HPA)
+CAL_BEAMLINE = XF.Calibration(gain=10.032, offset=-31.263)  # starting point; refitted on the map
+CAL = CAL_BEAMLINE
 DET = XF.Detector.from_fwhm(135.0, 5900.0, "Si", 0.12, 5.0, sensor_thickness_um=450.0,
-                            window_material="C", window_thickness_um=1.0, air_path_cm=20.0)
-GEOM = XM.Geometry(40.0, 40.0)
+                            window_material="C", window_thickness_um=1.0, air_path_cm=19.275,
+                            air_temperature_c=AIR_TEMP_C, air_pressure_hpa=AIR_PRESS_HPA)
+TWO_THETA_DEG = 123.2
+SETUP = XM.LabGeometry(surface_angle_deg=40.0, detector_azimuth_deg=TWO_THETA_DEG,
+                       detector_elevation_deg=0.0, y_upstream=True, detector_on_plus_x=True)
+GEOM = SETUP.nominal()
+R["geometry"] = dict(two_theta_deg=TWO_THETA_DEG, incidence_deg=GEOM.incidence_deg,
+                     takeoff_deg=GEOM.takeoff_deg, detector_air_cm=DET.air_path_cm,
+                     air_temperature_c=AIR_TEMP_C)
 ELEMENTS = ["In", "Ga", "As", "Cu", "Ni", "Ca", "Ar"]
 FAMILIES = ("K", "L")
 ROI_EV = (2900.0, 12600.0)
@@ -137,8 +155,8 @@ R["data"] = dict(n_pixels=int(n_pix), shape=[int(n_slow), int(n_fast)], step_um=
 print(f"data loaded ({time.time()-T0:.0f}s)")
 
 # ----------------------------------------------------------------------------- beam
-bl = XB.bm32_from_h5(H5)                                     # slits, mirrors, current of this scan
-bl_full = XB.bm32_from_h5(H5, vertical_acceptance="full", kb_angle_spread=False)   # pre-2026 model
+bl = XB.bm32_from_h5(H5, **BEAM_KW)                          # slits, mirrors, current of this scan
+bl_full = XB.bm32_from_h5(H5, vertical_acceptance="full", kb_angle_spread=False, **BEAM_KW)   # pre-2026 model
 raw_flux, phi, transfers = bl.spectrum(E)
 raw_full, phi_full, _ = bl_full.spectrum(E)
 dens = XB.per_unit_energy(E, phi)
@@ -179,7 +197,7 @@ R["beam"] = dict(field_t=src.magnetic_field_t, ec_kev=src.critical_energy_kev, g
                  mean_kev=float(trapezoid(dens * E, E) / trapezoid(dens, E)),
                  mean_kev_full=float(trapezoid(dens_full * E, E) / trapezoid(dens_full, E)),
                  flux_20kev_ph_s_bw=float(phi[np.argmin(abs(E - 20))] * INFO["horizontal_acceptance_urad"] * 1e-3),
-                 incident_air_m=3.3)
+                 incident_air_m=BEAM_KW["air_path_m"], incident_n2_m=BEAM_KW["n2_path_m"])
 
 
 def k_gaas(weight):
@@ -196,7 +214,7 @@ def k_gaas(weight):
 R["beam"]["k_gaas_per_bw"] = float(k_gaas(phi))
 R["beam"]["k_gaas_per_kev"] = float(k_gaas(dens))
 R["beam"]["k_gaas_full"] = float(k_gaas(dens_full))
-R["beam"]["k_gaas_no_kb_spread"] = float(k_gaas(XB.bm32_from_h5(H5, kb_angle_spread=False).spectral_density(E)))
+R["beam"]["k_gaas_no_kb_spread"] = float(k_gaas(XB.bm32_from_h5(H5, kb_angle_spread=False, **BEAM_KW).spectral_density(E)))
 ACC = np.array([1, 2, 5, 10, 20, 40, 80, 150, 300, 600, 1200])
 OFFS = (0.0, 20.0, 40.0)
 R["beam"]["acc_scan"] = dict(acc_urad=ACC.tolist(), offsets_urad=list(OFFS), k={
@@ -279,14 +297,14 @@ print(f"beam ({time.time()-T0:.0f}s)")
 
 # ----------------------------------------------------------------------------- detector
 Eev = np.linspace(1000, 20000, 800)
-rho_air = XB.air_density()
-t_air = np.array([np.exp(-xraylib.CS_Total_CP(XB.AIR_FORMULA, e / 1e3) * rho_air * 20.0) for e in Eev])
+rho_air = XB.air_density(AIR_TEMP_C, AIR_PRESS_HPA)
+t_air = np.array([np.exp(-xraylib.CS_Total_CP(XB.AIR_FORMULA, e / 1e3) * rho_air * DET.air_path_cm) for e in Eev])
 t_win = np.array([np.exp(-xraylib.CS_Total_CP("C", e / 1e3) * 2.2 * 1e-4) for e in Eev])
 absorb = np.array([1 - np.exp(-xraylib.CS_Photo(14, e / 1e3) * 2.33 * 450e-4) for e in Eev])
 eff = DET.efficiency(Eev)
 esc = np.array([sum(f for _, f in DET.escape_lines(e)) for e in Eev])
 R["detector"] = {k: float(DET.efficiency(v * 1000)) for k, v in LINE_E.items()}
-d21 = dataclasses.replace(DET, air_path_cm=21.0)
+d21 = dataclasses.replace(DET, air_path_cm=DET.air_path_cm + 1.0)
 R["detector"]["In_La1_per_cm"] = float(d21.efficiency(LINE_E["In La1"] * 1000) / DET.efficiency(LINE_E["In La1"] * 1000))
 R["detector"]["Ga_Ka1_per_cm"] = float(d21.efficiency(LINE_E["Ga Ka1"] * 1000) / DET.efficiency(LINE_E["Ga Ka1"] * 1000))
 d990 = dataclasses.replace(DET, air_pressure_hpa=990.0)
@@ -297,7 +315,7 @@ R["detector"]["escape_max"] = float(esc.max()); R["detector"]["escape_max_ev"] =
 
 fig, axs = plt.subplots(1, 3, figsize=(TEXTW, 2.1), gridspec_kw={"wspace": 0.45})
 ax = axs[0]
-ax.plot(Eev / 1e3, t_air, color="0.55", label="20 cm air")
+ax.plot(Eev / 1e3, t_air, color="0.55", label=f"{DET.air_path_cm:.1f} cm air")
 ax.plot(Eev / 1e3, t_win, color="0.75", ls="--", label="1 µm C window")
 ax.plot(Eev / 1e3, absorb, color=C["Ga"], label="450 µm Si (photo)")
 ax.plot(Eev / 1e3, eff, color="k", lw=1.4, label="total")
@@ -310,7 +328,7 @@ gaps = np.linspace(10, 30, 41)
 for k, col in (("In La1", C["In"]), ("Ga Ka1", C["Ga"]), ("As Ka1", C["As"])):
     ax.semilogy(gaps, [dataclasses.replace(DET, air_path_cm=g).efficiency(LINE_E[k] * 1000) for g in gaps],
                 color=col, label=greek(k))
-ax.axvline(20, color="0.6", lw=0.6, ls=":")
+ax.axvline(DET.air_path_cm, color="0.6", lw=0.6, ls=":")
 ax.set_xlabel("sample–detector air path (cm)"); ax.set_ylabel("efficiency")
 ax.set_title("Air-gap sensitivity"); ax.legend(loc="lower left"); panel(ax, "b")
 ax = axs[2]
@@ -351,6 +369,29 @@ for lvl, gl in LEVELS.items():
     ga = {l.name: float(l.rel) for l in next(x for x in gl if x.label == "As K").lines}
     R["In_L_rel"][lvl] = {k: gi.get(k) for k in ("L3M5", "L2M4", "L3N5", "L1M3")}
     R["As_K_rel"][lvl] = {k: ga.get(k) for k in ("KL2", "KM3")}
+
+# ----------------------------------------------------------------------------- energy calibration
+# Gain and offset refitted on the lines of the map itself (as in fluo_analysis_clean.ipynb),
+# starting from the beamline calibration; the fit range then follows the new calibration.
+fit_ref = XF.fit_average_spectrum(avg, LEVELS["matrix"], CAL_BEAMLINE, DET, ROI, yerr=cnt_err,
+                                  background_order=BKG, escape=True)
+fit_cal = XF.fit_average_spectrum(avg, LEVELS["matrix"], CAL_BEAMLINE, DET, ROI, yerr=cnt_err,
+                                  background_order=BKG, escape=True, fit_calibration=True)
+CAL = fit_cal.calibration
+_i = fit_cal.model.param_names.index("cal_gain")
+_cerr = np.sqrt(np.diag(fit_cal.pcov[_i:_i + 2, _i:_i + 2]))
+ROI = CAL.channel_range(*ROI_EV, n_ch)
+ROI_PP = CAL.channel_range(*PILEUP_ROI_EV, n_ch)
+Ech = CAL.energy(np.arange(n_ch))
+R["data"]["roi_channels"] = list(map(int, ROI))
+R["data"]["calibration"] = [CAL.gain, CAL.offset]
+R["calibration"] = dict(
+    beamline=[CAL_BEAMLINE.gain, CAL_BEAMLINE.offset], internal=[CAL.gain, CAL.offset],
+    gain_err=float(_cerr[0]), offset_err=float(_cerr[1]),
+    chi2_beamline=float(fit_ref.chi2_red), chi2_internal=float(fit_cal.chi2_red),
+    shift_ev={k: float(CAL_BEAMLINE.energy(CAL.channel(v * 1000)) - v * 1000)
+              for k, v in LINE_E.items()})
+print(f"calibration ({time.time()-T0:.0f}s)")
 
 # ----------------------------------------------------------------------------- pile-up
 P = XF.pileup_spectra(spectra, CAL, rt)
@@ -437,10 +478,10 @@ def requant(detector=DET, geometry=GEOM, stack=None, target=TARGET, spectrum=Non
 
 ST = Q["matrix"].stack
 cases = [("nominal", {}),
-         ("air 18 cm", dict(detector=dataclasses.replace(DET, air_path_cm=18.0))),
-         ("air 22 cm", dict(detector=dataclasses.replace(DET, air_path_cm=22.0))),
-         ("take-off 30°", dict(geometry=XM.Geometry(40, 30))),
-         ("take-off 50°", dict(geometry=XM.Geometry(40, 50))),
+         ("air −2 cm", dict(detector=dataclasses.replace(DET, air_path_cm=DET.air_path_cm - 2.0))),
+         ("air +2 cm", dict(detector=dataclasses.replace(DET, air_path_cm=DET.air_path_cm + 2.0))),
+         ("2θ −5°", dict(geometry=dataclasses.replace(SETUP, detector_azimuth_deg=TWO_THETA_DEG - 5).nominal())),
+         ("2θ +5°", dict(geometry=dataclasses.replace(SETUP, detector_azimuth_deg=TWO_THETA_DEG + 5).nominal())),
          ("film 1.52 µm", dict(stack=ST.replace(1, ST[1].with_thickness(1.52)))),
          ("film 2.28 µm", dict(stack=ST.replace(1, ST[1].with_thickness(2.28)))),
          ("cap 30 nm", dict(stack=ST.replace(0, ST[0].with_thickness(0.03)))),
@@ -448,13 +489,16 @@ cases = [("nominal", {}),
          ("no cap", dict(stack=XM.Stack([ST[1], ST[2]]), target=0)),
          ("990 hPa", dict(detector=dataclasses.replace(DET, air_pressure_hpa=990.0))),
          ("source G1 (all ψ)", dict(spectrum=phi_full)),
-         ("beam offset 25 µrad", dict(spectrum=XB.bm32_from_h5(H5, vertical_offset_urad=25.0).spectrum(E)[1])),
-         ("KB angles 2.5 mrad", dict(spectrum=XB.bm32_from_h5(H5, kbv_angle_mrad=2.5, kbh_angle_mrad=2.5).spectrum(E)[1])),
-         ("KB angles 3.5 mrad", dict(spectrum=XB.bm32_from_h5(H5, kbv_angle_mrad=3.5, kbh_angle_mrad=3.5).spectrum(E)[1]))]
+         ("beam offset 25 µrad", dict(spectrum=XB.bm32_from_h5(H5, vertical_offset_urad=25.0, **BEAM_KW).spectrum(E)[1])),
+         ("KB angles 2.5 mrad", dict(spectrum=XB.bm32_from_h5(H5, kbv_angle_mrad=2.5, kbh_angle_mrad=2.5, **BEAM_KW).spectrum(E)[1])),
+         ("KB angles 3.5 mrad", dict(spectrum=XB.bm32_from_h5(H5, kbv_angle_mrad=3.5, kbh_angle_mrad=3.5, **BEAM_KW).spectrum(E)[1]))]
 R["sensitivity"] = {lab: requant(**kwc) for lab, kwc in cases}
 from scipy.optimize import brentq
 _clos = lambda x: (lambda r: r["Ga"] + r["In"] - 1.0)(requant(detector=dataclasses.replace(DET, air_path_cm=x)))
-R["air_for_closure_cm"] = float(brentq(_clos, 12.0, 20.0, xtol=0.01))
+_grid = np.arange(5.0, 40.01, 1.0)
+_vals = [_clos(x) for x in _grid]
+_k = [i for i in range(len(_grid) - 1) if _vals[i] * _vals[i + 1] <= 0]
+R["air_for_closure_cm"] = float(brentq(_clos, _grid[_k[0]], _grid[_k[0] + 1], xtol=0.01)) if _k else None
 R["cap_scan"] = {}
 for tn in (0, 100, 200, 300, 400, 500):
     st = XM.Stack([ST[1], ST[2]]) if tn == 0 else ST.replace(0, ST[0].with_thickness(tn / 1000))
@@ -475,6 +519,18 @@ for name, kwm in {"none": dict(), "segments": dict(segments=SEG), "linear": dict
     MAPS[name] = XF.fit_map(spectra, scale, res.model, SH if "segments" in kwm else res.popt,
                             scan.scan_shape, pileup=P, **kwm)
 m_raw = XF.fit_map(spectra, np.ones_like(scale), res.model, res.popt, scan.scan_shape, pileup=P)
+# per-pixel weighting: the mean of the per-pixel areas against the average-spectrum
+# area (equal for an unbiased solve, the model being linear in the areas)
+WMAPS = {w: XF.fit_map(spectra, scale, res.model, res.popt, scan.scan_shape, pileup=P, weights=w)
+         for w in ("neyman", "pearson", "uniform")}
+R["weights"] = {w: dict(
+    mean_vs_average_pct={lab: float(100 * (np.nanmean(mw.area_map(lab)) / res.areas[lab] - 1))
+                         for lab in mw.group_labels},
+    snr={lab: float(np.nanmedian(mw.snr(lab))) for lab in mw.group_labels},
+    chi2_median=float(np.nanmedian(mw.chi2_red)),
+    ratio_in_as_median=float(np.nanmedian(mw.area_map("In L") / mw.area_map("As K"))))
+    for w, mw in WMAPS.items()}
+R["weights"]["pearson_iterations"] = 2
 inv = np.nanmax(np.abs((MAPS["none"].area_map("Ga K") / MAPS["none"].area_map("As K"))
                        / (m_raw.area_map("Ga K") / m_raw.area_map("As K")) - 1))
 rowmed = {k: np.nanmedian(v.area_map("Ga K") / v.area_map("As K"), axis=1) for k, v in MAPS.items()}
@@ -578,7 +634,7 @@ for y, t in main:
     box(36, y, 28, 6, t, fc="#eaf2f8" if ("fit" in t or "composition" in t) else "#f4f6f7")
 for (y0, _), (y1, _) in zip(main[:-1], main[1:]):
     arrow(50, y0 - 0.6, 50, y1 + 6.6)
-for y, t, tgt in ((40, "Beam model\nbending magnet, slit acceptance,\nIr mirrors, Be, 3.3 m air\n→ spectral density dΦ/dE", 32.5),
+for y, t, tgt in ((40, "Beam model\nbending magnet, slit acceptance,\nIr mirrors, Be, air + N$_2$\n→ spectral density dΦ/dE", 32.5),
                   (21, "Fundamental parameters\nKissel cross sections,\nfluorescence yields,\nCoster–Kronig transitions", 29.5)):
     box(0.5, y, 28, 11, t, fc="#fdf2e9"); arrow(29.3, y + 5.5, 35.4, tgt)
 for y, t, tgt in ((40, "Detector model\nFano resolution, Voigt shape,\nSi escape, pile-up,\nefficiency (air, C, Si)", 32.5),

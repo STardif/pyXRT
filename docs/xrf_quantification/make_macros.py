@@ -91,7 +91,7 @@ for o_, L_ in (("10.0", "Ten"), ("25.0", "TwentyFive"), ("50.0", "Fifty")):
     m(f"Off{L_}", f(100 * (B["off_scan"][o_] / B["k_gaas_per_kev"] - 1), 2))
 m("FluxTwenty", num(B["flux_20kev_ph_s_bw"], 2))
 m("KBSpreadEffect", f(100 * (B["k_gaas_per_kev"] / B["k_gaas_no_kb_spread"] - 1), 2))
-m("AirForClosure", f(R["air_for_closure_cm"], 1))
+m("AirForClosure", f(R["air_for_closure_cm"], 1) if R["air_for_closure_cm"] is not None else "--")
 m("AccRatioLo", f(B["fwhm_psi_urad"]["30"] / B["v_acc_urad"], 0)); m("AccRatioHi", f(B["fwhm_psi_urad"]["5"] / B["v_acc_urad"], 0))
 
 # --- detector
@@ -128,6 +128,23 @@ for lab, L in (("In L", "In"), ("Ga K", "Ga"), ("As K", "As"), ("Cu K", "Cu"), (
     m(f"Area{L}", f(a, 2) if a < 1000 else f(a, 0)); m(f"AreaErr{L}", f(e, 2) if e < 1 else f(e, 1))
     m(f"Snr{L}", f(MAPS["snr"][lab], 1) if MAPS["snr"][lab] < 20 else f(MAPS["snr"][lab], 0))
 
+# --- per-pixel weighting (Neyman / Pearson / uniform)
+WT = R["weights"]
+WNAMES = {"neyman": "Ney", "pearson": "Pea", "uniform": "Uni"}
+wrows = []
+for lab, L in (("In L", "In"), ("Ga K", "Ga"), ("As K", "As"), ("Cu K", "Cu"), ("Ni K", "Ni"),
+               ("Ca K", "Ca"), ("Ar K", "Ar")):
+    for w, W in WNAMES.items():
+        m(f"W{W}{L}", f"{WT[w]['mean_vs_average_pct'][lab]:+.1f}")
+    sn = WT["pearson"]["snr"][lab]
+    wrows.append(f"{lab} & {f(WT['neyman']['snr'][lab], 1)} & {f(sn, 1)} & "
+                 + " & ".join(f"${WT[w]['mean_vs_average_pct'][lab]:+.1f}$" for w in WNAMES) + r" \\")
+out.append("\\newcommand{\\rWeightRows}{%\n" + "\n".join(wrows) + "}")
+for w, W in WNAMES.items():
+    m(f"WChi{W}", f(WT[w]["chi2_median"], 2))
+m("WInAsPct", f"{100 * (WT['pearson']['ratio_in_as_median'] / WT['neyman']['ratio_in_as_median'] - 1):+.0f}")
+m("PearsonIter", WT["pearson_iterations"])
+
 # --- quantification
 m("xGa", f(Q["ratios"]["Ga"], 4)); m("xIn", f(Q["ratios"]["In"], 3)); m("Closure", f(Q["closure"], 3))
 m("Iter", Q["iterations"]); m("kGa", f(Q["k"]["Ga K"], 4)); m("kIn", f(Q["k"]["In L"], 1))
@@ -155,7 +172,8 @@ rows = []
 nom = R["sensitivity"]["nominal"]
 for lab, v in R["sensitivity"].items():
     lab_tex = (lab.replace("µm", "\\si{\\micro\\metre}").replace("°", "\\si{\\degree}")
-               .replace("µrad", "\\si{\\micro\\radian}").replace("ψ", "$\\psi$").replace("G1", "$G_1$"))
+               .replace("µrad", "\\si{\\micro\\radian}").replace("ψ", "$\\psi$").replace("G1", "$G_1$")
+               .replace("2θ", "$2\\theta$").replace("−", "$-$").replace("+", "$+$"))
     rows.append(f"{lab_tex} & {v['Ga']:.4f} & \\num{{{(round(100 * (v['Ga'] / nom['Ga'] - 1), 1) + 0.0):+.1f}}} & {v['In']:.3f} & "
                 f"{v['Ga'] + v['In']:.3f} \\\\")
 out.append("\\newcommand{\\rSensitivityRows}{%\n" + "\n".join(rows) + "}")
@@ -170,8 +188,23 @@ m("xGaGOne", f(G1c["Ga"], 4)); m("xInGOne", f(G1c["In"], 3)); m("ClosureGOne", f
 m("GOneShift", f(100 * (R["quant"]["ratios"]["Ga"] / G1c["Ga"] - 1), 1))
 for k_, L_ in (("KB angles 2.5 mrad", "KBLo"), ("KB angles 3.5 mrad", "KBHi"), ("beam offset 25 µrad", "OffTF")):
     m(f"xGa{L_}", f(R["sensitivity"][k_]["Ga"], 4)); m(f"Closure{L_}", f(R["sensitivity"][k_]["Ga"] + R["sensitivity"][k_]["In"], 3))
-m("ClosureAirLo", f(S["air 18 cm"]["Ga"] + S["air 18 cm"]["In"], 2))
-m("ClosureAirHi", f(S["air 22 cm"]["Ga"] + S["air 22 cm"]["In"], 2))
+m("ClosureAirLo", f(S["air −2 cm"]["Ga"] + S["air −2 cm"]["In"], 2))
+m("ClosureAirHi", f(S["air +2 cm"]["Ga"] + S["air +2 cm"]["In"], 2))
+for k_, L_ in (("air −2 cm", "AirLo"), ("air +2 cm", "AirHi"), ("2θ −5°", "TthLo"), ("2θ +5°", "TthHi")):
+    m(f"xGa{L_}", f(S[k_]["Ga"], 4)); m(f"xIn{L_}", f(S[k_]["In"], 3))
+    m(f"Closure{L_}Exact", f(S[k_]["Ga"] + S[k_]["In"], 3))
+
+# --- geometry and energy calibration
+GE, CA = R["geometry"], R["calibration"]
+m("TwoTheta", f(GE["two_theta_deg"], 1)); m("Incidence", f(GE["incidence_deg"], 1))
+m("Takeoff", f(GE["takeoff_deg"], 1)); m("DetAir", f(GE["detector_air_cm"], 1))
+m("AirTemp", f(GE["air_temperature_c"], 0))
+m("CalGainBL", f(CA["beamline"][0], 3)); m("CalOffsetBL", f(CA["beamline"][1], 2))
+m("CalOffsetFit", f(CA["internal"][1], 2)); m("CalGainFit", f(CA["internal"][0], 4))
+m("CalGainErr", f(CA["gain_err"], 4)); m("CalOffsetErr", f(CA["offset_err"], 2))
+m("CalChiBL", f(CA["chi2_beamline"], 0)); m("CalChiFit", f(CA["chi2_internal"], 0))
+for k_, L_ in (("In La1", "In"), ("Ga Ka1", "Ga"), ("As Ka1", "As")):
+    m(f"CalShift{L_}", f"{CA['shift_ev'][k_]:+.1f}")
 
 # --- resolution
 m("WinLo", f(RES["window_ev"][0], 0)); m("WinHi", f(RES["window_ev"][1], 0))
