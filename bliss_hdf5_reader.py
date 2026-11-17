@@ -22,6 +22,7 @@ Scan geometry
     loopscan, timescan, ...
     amesh / dmesh / fscan2d        (n_slow, n_fast)
     fscan3d                        (n_slowest, n_mid, n_fast)
+    lookupscan on a grid           (n_slow, n_fast) for 2 motors, ...
 
 The geometry is taken from the scan title when the command is recognised, and
 otherwise inferred from the measured motor positions, so scans with a custom
@@ -34,6 +35,22 @@ Aborted scans: ``scan.npoints`` is the number of points actually recorded and
 ``(npoints,)``; for meshes it stays the planned grid and missing points are
 NaN in gridded data. Meshes acquired back-and-forth (snake) are detected from
 the fast-motor positions and un-snaked in gridded data.
+
+Trajectory scans (``lookupscan ... on motors (m1,m2,...)``) visit a list of
+points in any order. When the positions of the motors form a regular grid
+(each motor on a set of levels, every grid cell visited at most once), the
+scan gets the grid shape, the first motor of the title being the fastest one
+(as in amesh): ``lookupscan ... (xech,yech)`` gives (n_yech, n_xech). The
+data are then REORDERED IN MEMORY: everything returned by ``get()``,
+``positions()`` and stored in ``counters`` follows the grid order (row by
+row), so that ``scan.counters[name].reshape(scan.shape)`` works as for a
+mesh. The file is not changed: ``scan.point_number[k]`` is the original point
+number (frame index, ``read_frame`` argument) of the k-th value, and
+``scan.index_grid`` the same numbers on the grid. Arrays in the original
+order (e.g. per-frame results from ``iter_frames``) are put in grid order with
+``scan.to_scan_order(data)``. Trajectories that are not a grid stay 1D, in
+acquisition order. A custom-titled scan whose motor positions form a complete
+grid is recognised the same way.
 
 ``BlissMeshScan`` is kept for existing scripts: a ``BlissScan`` that must be
 two-dimensional and exposes the former ``fast_*`` / ``slow_*`` attributes.
@@ -60,6 +77,8 @@ TIME_AXES = ("elapsed_time", "epoch", "epoch_trig", "timer_trig")
 # Commands without a motor: one dimension indexed by time / point number.
 TIME_SCANS = ("loopscan", "timescan", "ftimescan", "fscanloop", "limatake")
 SINGLE_POINT_SCANS = ("ct", "sct")
+# Commands that visit a list of points: geometry from the motor positions.
+TRAJECTORY_SCANS = ("lookupscan", "pointscan")
 
 
 # --------------------------------------------------------------------------- #
@@ -254,6 +273,45 @@ def _parse_single_point(cmd: str, args: List[str]):
     return (), [], count_time
 
 
+def _trajectory_motors(title: str) -> Tuple[List[str], Optional[float]]:
+    """lookupscan <count_time> on motors (m1,m2,...): motor names, count time."""
+    match = re.search(r"motors\s*\(([^)]*)\)", title)
+    names = [n.strip() for n in match.group(1).split(",") if n.strip()] if match else []
+    args = title.split()[1:2]
+    count_time = float(args[0]) if args and _is_number(args[0]) else None
+    return names, count_time
+
+
+def _grid_levels(pos: np.ndarray, min_ratio: float = 5.0) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Group the positions of a motor into levels: (sorted level values, level
+    index of every point). Gaps between sorted positions are split into
+    'between levels' and 'inside a level' (readback noise) at the largest
+    ratio between consecutive gap sizes. If no such contrast exists (ratio
+    below `min_ratio`), every distinct position is its own level.
+    """
+    pos = np.asarray(pos, dtype=float)
+    order = np.argsort(pos, kind="stable")
+    gaps = np.diff(pos[order])
+    if gaps.size == 0:
+        return pos[:1].copy(), np.zeros(pos.size, dtype=np.int64)
+    floor = 1e-12 * max(1.0, float(np.abs(pos).max()))
+    desc = np.sort(gaps)[::-1]
+    ratio = desc[:-1] / np.maximum(desc[1:], floor) if desc.size > 1 else np.array([np.inf])
+    if desc[0] <= floor:                         # the motor does not move
+        threshold = np.inf
+    elif desc.size > 1 and ratio.max() >= min_ratio:
+        k = int(np.argmax(ratio))
+        threshold = 0.5 * (desc[k] + desc[k + 1])
+    else:
+        threshold = floor
+    new_level = np.concatenate([[0], np.cumsum(gaps > threshold)])
+    index = np.empty(pos.size, dtype=np.int64)
+    index[order] = new_level
+    levels = np.array([np.median(pos[index == i]) for i in range(new_level[-1] + 1)])
+    return levels, index
+
+
 def _parse_title(title: str):
     tokens = title.replace(",", " ").split()
     if not tokens:
@@ -316,6 +374,10 @@ class BlissScan:
         self.nb_images: int = 0                      # image files
         self.nb_frames: int = 0                      # detector frames
         self.scan_folder = self.h5_filepath.parent / f"scan{self.scan_number:04d}"
+        # Trajectory scans put on a grid: original point number at each grid
+        # cell (flat, C order), -1 where no point was recorded. None = data
+        # are kept in acquisition order.
+        self._scan_order: Optional[np.ndarray] = None
 
         self._read_metadata()
 
@@ -354,7 +416,12 @@ class BlissScan:
 
         self.command, parsed = _parse_title(self.title)
         self.scan_type = self.command          # former attribute name
-        if parsed is not None:
+        if self.command in TRAJECTORY_SCANS:
+            names, title_time = _trajectory_motors(self.title)
+            self.shape, self.motors, self._scan_order = self._trajectory_geometry(
+                names, npts_param, strict=False)
+            self.geometry_source = "trajectory"
+        elif parsed is not None:
             self.shape, self.motors, title_time = parsed
             self.geometry_source = "title"
         else:
@@ -369,7 +436,9 @@ class BlissScan:
         planned = int(np.prod(self.shape)) if self.shape else 1
         if self.shape and planned == 0:          # timescan without npoints
             planned = None
-        if self.geometry_source == "data":
+        if self._scan_order is not None:
+            planned = self._scan_order.size
+        elif self.geometry_source in ("data", "trajectory"):
             planned = npts_param or self.npoints
         elif npts_param and planned and npts_param != planned:
             logger.warning("Scan %s: title gives %d points but scan_parameters %d; using the latter.",
@@ -441,6 +510,12 @@ class BlissScan:
                         m.npoints = n_slow
             return (n_slow, n_fast), motors
 
+        # points visited in any order on a complete grid (trajectory scans)
+        shape, motors, order = self._trajectory_geometry(list(moving), npts_planned, strict=True)
+        if order is not None:
+            self._scan_order = order
+            return shape, motors
+
         # 1D: every motor that moves
         motors = [ScanMotor(k, 0, n, float(v[0]), float(v[-1])) for k, v in moving.items()]
         return (n,), motors
@@ -492,8 +567,91 @@ class BlissScan:
             return (n_slow, row), motors
         return None
 
+    def _trajectory_geometry(self, names: Sequence[str], npts_planned: Optional[int],
+                             strict: bool):
+        """
+        Geometry of points visited in any order: (shape, motors, scan_order).
+
+        Each motor's positions are grouped into levels (`_grid_levels`);
+        motors with the same level pattern (a motor and its encoder, ...) share
+        a dimension. The motors are taken in the order of `names`, the first
+        one being the fastest (last) dimension. The points form a grid if every
+        grid cell holds at most one point and the grid size is the planned
+        number of points (`strict`=False, lookupscan: missing cells allowed
+        if the scan stopped early) or exactly the number of recorded points
+        (`strict`=True, used for scans with an unknown title).
+
+        scan_order is None when the points do not form a grid of at least
+        two dimensions: the scan is then 1D in acquisition order.
+        """
+        n = self.npoints
+        known = [m for m in names if m in self._positions_cache]
+        for m in names:
+            if m not in self._positions_cache:
+                logger.warning("Scan %s: trajectory motor '%s' not recorded at each point.",
+                               self.scan_key, m)
+        # (name, levels, index) of the motors that move
+        groups: List[Tuple[List[str], List[np.ndarray], np.ndarray]] = []
+        for name in known:
+            pos = self._positions_cache[name]
+            if n < 2 or np.ptp(pos) <= 1e-9 * max(1.0, np.abs(pos).max()):
+                continue
+            levels, index = _grid_levels(pos)
+            for group in groups:
+                if np.array_equal(group[2], index):
+                    group[0].append(name)
+                    group[1].append(levels)
+                    break
+            else:
+                groups.append(([name], [levels], index))
+
+        def one_dim():
+            motors = [ScanMotor(k, 0, n, float(self._positions_cache[k][0]),
+                                float(self._positions_cache[k][-1]))
+                      for g in groups for k in g[0]]
+            return (n,), motors, None
+
+        if len(groups) < 2:
+            return one_dim()
+        groups = groups[::-1]                      # slowest first
+        shape = tuple(len(g[1][0]) for g in groups)
+        cells = int(np.prod(shape))
+        flat = np.ravel_multi_index(tuple(g[2] for g in groups), shape)
+        if np.unique(flat).size != n:
+            if not strict:
+                logger.warning("Scan %s: the %d points do not form a grid (several points per "
+                               "cell of a %s grid); kept as a 1D scan.", self.scan_key, n, shape)
+            return one_dim()
+        expected = n if strict else (npts_planned or n)
+        if cells != expected and not (not strict and n < cells <= expected):
+            if not strict:
+                logger.warning("Scan %s: the %d points span a %s grid of %d cells, "
+                               "planned %d points; kept as a 1D scan.",
+                               self.scan_key, n, shape, cells, expected)
+            return one_dim()
+
+        motors = []
+        for dim, (group_names, group_levels, _) in enumerate(groups):
+            for name, levels in zip(group_names, group_levels):
+                motors.append(ScanMotor(name, dim, len(levels), float(levels[0]), float(levels[-1])))
+                steps = np.diff(levels)
+                if steps.size > 1 and np.ptp(steps) > 0.05 * abs(np.median(steps)):
+                    logger.warning("Scan %s: the positions of '%s' are not evenly spaced "
+                                   "(steps %.4g to %.4g).", self.scan_key, name,
+                                   steps.min(), steps.max())
+        order = np.full(cells, -1, dtype=np.int64)
+        order[flat] = np.arange(n)
+        if n < cells:
+            logger.warning("Scan %s: %d of %d grid cells recorded; missing cells are NaN.",
+                           self.scan_key, n, cells)
+        logger.info("Scan %s: trajectory of %d points put on a %s grid (data reordered in "
+                    "memory, see point_number).", self.scan_key, n, shape)
+        return shape, motors, order
+
     def _detect_snake(self) -> bool:
         """True if a 2D scan was acquired back-and-forth (odd rows reversed)."""
+        if self._scan_order is not None:
+            return False
         if len(self.shape) != 2 or self.shape[0] < 2 or self.npoints < 2 * self.shape[1]:
             return False
         fast = [m for m in self.motors if m.dim == 1]
@@ -530,9 +688,45 @@ class BlissScan:
         return [m for m in self.motors if m.dim == dim]
 
     @property
+    def reordered(self) -> bool:
+        """True if the data are held in grid order, not in acquisition order
+        (trajectory scans put on a grid)."""
+        return self._scan_order is not None
+
+    @property
+    def point_number(self) -> np.ndarray:
+        """Original point number (index in the file, `read_frame` argument) of
+        each value of `counters` / `get()`, -1 for grid cells without a point.
+        `arange(npoints)` unless the scan was reordered."""
+        if self._scan_order is not None:
+            return self._scan_order.copy()
+        return np.arange(self.npoints)
+
+    def to_scan_order(self, data: np.ndarray) -> np.ndarray:
+        """
+        Put per-point data given in the original (acquisition / file) order in
+        the order used by `counters` and `get()`. Identity unless the scan was
+        reordered; then grid cells without a point are NaN. Data whose first
+        axis is not the number of points are returned unchanged.
+        """
+        data = np.asarray(data)
+        if self._scan_order is None or data.ndim == 0 or data.shape[0] != self.npoints:
+            return data
+        order = self._scan_order
+        if np.all(order >= 0):
+            return data[order]
+        out = np.full(order.shape + data.shape[1:], np.nan,
+                      dtype=np.result_type(data.dtype, np.float32))
+        out[order >= 0] = data[order[order >= 0]]
+        return out
+
+    @property
     def index_grid(self) -> np.ndarray:
-        """Flat point index at each grid position (-1 where no point was recorded).
-        Use it to place any per-point quantity on the scan grid."""
+        """Original point number (index in the file) at each grid position, -1
+        where no point was recorded. Use it to place per-point quantities in
+        acquisition order on the scan grid, e.g. `frames[scan.index_grid]`."""
+        if self._scan_order is not None:
+            return self._scan_order.reshape(self.shape).copy()
         planned = int(np.prod(self.shape)) if self.shape else 1
         idx = np.full(planned, -1, dtype=np.int64)
         n = min(self.npoints, planned)
@@ -557,6 +751,8 @@ class BlissScan:
         With grid=True the per-point axis is reshaped to `self.shape`
         (2D spectra become (n_slow, n_fast, n_channels), etc.).
         Counters already loaded by `read_data()` are not read again.
+        Reordered scans (trajectories on a grid): values in grid order, see
+        `point_number`.
         """
         if name in self.counters:
             data = self.counters[name]
@@ -570,7 +766,7 @@ class BlissScan:
                 logger.warning("Reading '%s' %s loads %.1f GB into memory; "
                                "use read_frame() for images.", name, shape, nbytes / 2 ** 30)
             with _open(self.h5_filepath) as f:
-                data = f[f"{self.scan_key}/measurement/{name}"][()]
+                data = self.to_scan_order(f[f"{self.scan_key}/measurement/{name}"][()])
         return self.to_grid(data, name) if grid else data
 
     def __getitem__(self, name: str) -> np.ndarray:
@@ -583,6 +779,8 @@ class BlissScan:
     def to_grid(self, data: np.ndarray, name: str = "array") -> np.ndarray:
         """
         Place per-point data (first axis = point index) on the scan grid.
+        The data are expected in the order of `get()` / `counters` (grid order
+        for reordered trajectory scans; use `index_grid` for data in file order).
 
         Missing points of an aborted mesh are NaN (integer data are converted
         to float for that), back-and-forth rows are put back in order.
@@ -600,6 +798,9 @@ class BlissScan:
                              "it is not one value per point.")
         if n > size:            # aborted 1D scan: a counter one point ahead of the others
             data, n = data[:size], size
+        if self._scan_order is not None and n != size:
+            raise ValueError(f"'{name}' has {n} values; this reordered scan expects {size} "
+                             "values in grid order (use to_scan_order() on data in file order).")
         if n == size and not self.snake:
             return data.reshape(self.shape + data.shape[1:])
 
@@ -616,7 +817,8 @@ class BlissScan:
     def read_data(self, extra_counters: Optional[Sequence[str]] = None) -> None:
         """
         Load the scanned motors and the requested counters into `self.counters`
-        (raw, as stored), put scalar counters on the scan grid in `self.grids`,
+        (as stored, but in grid order for reordered trajectory scans: see
+        `point_number`), put scalar counters on the scan grid in `self.grids`,
         and locate the detector image files.
         """
         names = [m.name for m in self.motors if m.name in self._datasets]
@@ -632,7 +834,7 @@ class BlissScan:
             meas = f[f"{self.scan_key}/measurement"]
             for name in names:
                 if name not in self.counters:
-                    self.counters[name] = meas[name][()]
+                    self.counters[name] = self.to_scan_order(meas[name][()])
 
         for name, data in self.counters.items():
             if data.ndim == 1:
@@ -693,7 +895,8 @@ class BlissScan:
 
     def read_frame(self, index: int, detector: Optional[str] = None,
                    roi: Optional[Tuple[slice, slice]] = None) -> np.ndarray:
-        """One detector frame by point index (through the master file).
+        """One detector frame by original point number (through the master file);
+        for reordered scans the frame of grid value k is `point_number[k]`.
         `roi` = (row slice, column slice) returns only that part of the frame."""
         detector = self._pick_detector(detector)
         if detector is None:
@@ -706,7 +909,8 @@ class BlissScan:
                     indices: Optional[Sequence[int]] = None,
                     roi: Optional[Tuple[slice, slice]] = None) -> Iterator[np.ndarray]:
         """Frames one at a time, keeping the file open (faster than repeated
-        `read_frame` calls). `roi` as in `read_frame`."""
+        `read_frame` calls), in file order unless `indices` (original point
+        numbers) are given. `roi` as in `read_frame`."""
         detector = self._pick_detector(detector)
         if detector is None:
             return
@@ -750,11 +954,12 @@ class BlissScan:
             return out
 
     def get_relative_position_grid(self, motor_name: str, scale: float = 1000.0) -> np.ndarray:
-        """Gridded positions relative to the first recorded point, times `scale`
+        """Gridded positions relative to the first recorded grid cell (the first
+        point, except for reordered trajectory scans), times `scale`
         (default 1000: mm -> µm)."""
         grid = self.to_grid(self.positions(motor_name), motor_name)
         flat = grid.ravel()
-        origin = flat[self.index_grid.ravel() == 0][0] if grid.ndim else grid
+        origin = flat[self.index_grid.ravel() >= 0][0] if grid.ndim else grid
         return (grid - origin) * scale
 
     def summary(self) -> str:
@@ -762,7 +967,8 @@ class BlissScan:
         status = "complete" if self.is_complete else f"INCOMPLETE ({self.end_reason})"
         planned = f" of {self.npoints_planned}" if self.npoints_planned else ""
         lines.append(f"  shape {self.shape} [{self.geometry_source}], {self.npoints}{planned} "
-                     f"points, {status}" + (", back-and-forth" if self.snake else ""))
+                     f"points, {status}" + (", back-and-forth" if self.snake else "")
+                     + (", reordered on the grid (see point_number)" if self.reordered else ""))
         if self.count_time is not None:
             lines.append(f"  count time {self.count_time:g} s")
         for m in sorted(self.motors, key=lambda m: m.dim):
@@ -792,7 +998,8 @@ class BlissScan:
 
 class BlissMeshScan(BlissScan):
     """
-    A two-dimensional scan (amesh, dmesh, fscan2d, or a mesh with a custom title),
+    A two-dimensional scan (amesh, dmesh, fscan2d, a trajectory scan on a 2D
+    grid, or a mesh with a custom title),
     with the attributes of the former mesh-only reader:
 
         fast_motor_name, fast_start, fast_stop, fast_intervals, fast_steps,
@@ -800,6 +1007,9 @@ class BlissMeshScan(BlissScan):
         expected_points, count_time, scan_type.
 
     Grids are (slow, fast): rows follow the slow motor, whatever its name.
+    For trajectory scans the data are reordered in memory so that
+    `counters[name].reshape(scan_shape)` is the map; `point_number` gives the
+    original point number of each value.
     """
 
     def _read_metadata(self) -> None:
