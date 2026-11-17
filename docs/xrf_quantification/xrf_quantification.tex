@@ -62,9 +62,12 @@ The Ga/As atom ratio of the film comes out as \rxGa{} from the average spectrum 
 thickness the ratio stays within
 \rxGaMin--\rxGaMax. The In content, measured with the In L lines at
 \qty{3.3}{keV}, is not under control: $(n_\mathrm{Ga}+n_\mathrm{In})/n_\mathrm{As}=\rClosure$
-instead of~1. The main reason is the \qty{20}{cm} of air between sample and detector, which transmits
-only a few per cent of In~L$\alpha$ and whose length is not known to better than a few
-centimetres. We close with recommendations for the instrument and the analysis.
+instead of~1. The In~L lines cross \qty{\rDetAir}{cm} of air between sample and detector, which
+transmits only a few per cent of In~L$\alpha$ and changes it by \qty{\rInPerCmPct}{\percent} per
+centimetre. With the measured air path and the detector angle calibrated on GaAs wafers, closing the
+balance would need \qty{\rAirForClosure}{cm} of air: the excess points to the soft-line chain
+(efficiency and fundamental parameters below \qty{4}{keV}) more than to the geometry.
+We close with recommendations for the instrument and the analysis.
 \end{abstract}
 
 \tableofcontents
@@ -82,7 +85,7 @@ a monochromatic beam:
 excitation band, so the relative strength of lines from different subshells and the relative
 sensitivity to different elements depend on the shape of that band;
 \item the band itself is shaped by the source, four grazing-incidence mirrors, two Be windows and a
-measured \qty{3.3}{m} incident air path, none of which is directly measured spectrally, and by
+measured \qty{3.3}{m} incident gas path, none of which is directly measured spectrally, and by
 slits that pass only a narrow vertical slice of the emission;
 \item absorption of the exciting radiation and secondary fluorescence must be integrated over the band
 and over the depth of a layered sample;
@@ -121,14 +124,21 @@ and return the beam close to horizontal: the height difference of the two mirror
 (\qty{21.1}{mm}) matches $2\theta_1$ times their separation (\qty{20.96}{mm}). Guard slits s2 remove
 scattered radiation. Slits s3 define the illumination of the Kirkpatrick--Baez (KB) pair, an
 elliptical Ir mirror focusing vertically and one focusing horizontally, which image the source on the
-sample. Two \qty{500}{\micro\metre} Be windows and \qty{3.3}{m} of air (measured) complete the
-excitation path. The KB grazing angles are not recorded in the scan files and are taken as
+sample. Two \qty{500}{\micro\metre} Be windows and a \qty{3.3}{m} gas path (measured) complete the
+excitation path: \qty{0.633}{m} of it is flushed with dry N$_2$, the remaining \qty{2.667}{m} is
+ambient air. The KB grazing angles are not recorded in the scan files and are taken as
 \qty{3}{mrad}. Section~\ref{sec:beam} shows that the apertures, through the vertical acceptance they
 impose, change the spectrum.
 
-The sample is inclined so that both the incident beam and the detector axis make an angle of about
-$40^\circ$ with its surface; these two angles are \emph{assumed} in this note, not measured, and
-Section~\ref{sec:uncertainty} shows what that costs.
+The sample surface makes \ang{40} with the horizontal beam, so the incidence angle is
+$\psi_\mathrm{in}=\ang{\rIncidence}$. The detector axis is horizontal, at $2\theta=\ang{\rTwoTheta}$ from
+the beam, so its take-off angle from the tilted surface is
+$\psi_\mathrm{out}=\arcsin(\sin\ang{40}\,|\cos2\theta|)=\ang{\rTakeoff}$, much smaller than the angle
+between detector and surface seen from above ($2\theta-\ang{90}$). $2\theta$ is not measured: it was
+calibrated in November 2026 on two GaAs wafers, as the angle that gives Ga:As = 1:1
+(\code{GaAs\_calibration.ipynb}); the independent Ga~K$\beta$/K$\alpha$ ratio agrees within about a degree.
+The map of this note was recorded in September 2026, and the detector is assumed not to have moved in
+between. Section~\ref{sec:uncertainty} shows what the angle costs.
 
 \begin{table}[t]
 \centering
@@ -159,10 +169,10 @@ sample & 45.0 & & & & \\
 \subsection{Detector}
 The fluorescence detector is a KETEK VITUS H7 silicon-drift detector (SDD) with a \qty{450}{\micro\metre}
 Si sensor and a \qty{1}{\micro\metre} carbon (graphene) entrance window, read out by a XIA processor.
-Its window is about \qty{20}{cm} from the sample, in air. The MCA has 2048 channels with the linear
+Its window is \qty{\rDetAir}{cm} from the sample, in air (measured in November 2026). The MCA has 2048 channels with the linear
 calibration
 \begin{equation}
-E\,[\mathrm{eV}] = \rCalGain\, c - \num{31.263},
+E\,[\mathrm{eV}] = \rCalGain\, c \rCalOffset ,
 \label{eq:calibration}
 \end{equation}
 so that it covers \qtyrange{0}{20.5}{keV}. The processor records, per pixel, the live time
@@ -370,16 +380,19 @@ high-energy cut-off of the KB pair between about \num{25} and \qty{35}{keV}. It 
 Ga/As sensitivity by \qty{\rKBSpreadEffect}{\percent}. The bending of m1 and m2 changes their grazing angle
 along the footprint by only $L/R\approx\qty{0.02}{mrad}$, which is neglected.
 
-Windows and air transmit $T=\exp[-(\mu/\rho)\rho t]$, with total attenuation coefficients and,
-for air, the density of an ideal gas of N, O, Ar and C at \qty{20}{\degreeCelsius} and
-\qty{1013.25}{hPa}. The spectrum at the sample is
+Windows and gas transmit $T=\exp[-(\mu/\rho)\rho t]$, with total attenuation coefficients and,
+for air, the density of an ideal gas of N, O, Ar and C at \qty{\rAirTemp}{\degreeCelsius} and
+\qty{1013.25}{hPa}; the N$_2$ section is pure nitrogen under the same conditions. Per metre, N$_2$
+absorbs about \qty{27}{\percent} less than air between \num{8} and \qty{15}{keV}, because it contains
+neither argon nor oxygen. The spectrum at the sample is
 \begin{equation}
 \Phi(E) = \int_{\psi_0-\Delta\psi_\mathrm{acc}/2}^{\psi_0+\Delta\psi_\mathrm{acc}/2}
 \frac{\dd^2\dot N}{\dd\theta\,\dd\psi}(E,\psi)\,\dd\psi\;\prod_{j} T_j(E),
 \label{eq:phi}
 \end{equation}
 with $\psi_0=0$ for apertures centred on the beam, shown in Fig.~\ref{fig:beam}a,b. The mirrors cut
-off above about \qty{28}{keV}. The \qty{3.3}{m} of air, not the Be windows, sets the low-energy end.
+off above about \qty{28}{keV}. The gas path, mostly its \qty{2.667}{m} of air, and not the Be windows,
+sets the low-energy end.
 The Ir L edges imprint three small steps between \num{11.2} and \qty{13.4}{keV}. The band where $\Phi$
 exceeds \qty{10}{\percent} of its maximum is \qtyrange{\rBandTenLo}{\rBandTenHi}{keV}
 (\qtyrange{\rBandOneLo}{\rBandOneHi}{keV} at \qty{1}{\percent}). With a vertically integrated source it
@@ -416,11 +429,16 @@ source, each normalised to its maximum; dotted lines mark the Ga and As K edges.
 \section{Detector response}\label{sec:detector}
 %=====================================================================================
 \subsection{Energy calibration}
-The linear calibration of Eq.~\eqref{eq:calibration} is taken from the beamline and held fixed in the
-fit. Its stability is checked by the centroid analysis of Section~\ref{sec:resolution}: the Ga~K$\alpha$
-centroid moves by \qty{\rCentroidRange}{eV} at most over the scan and shows no step. Its absolute accuracy
-has not been tested beyond the quality of the fit; refining gain and offset is one of the
-recommendations of Section~\ref{sec:recommendations}.
+Gain and offset change from one session to the next by several electronvolts, so the calibration of
+Eq.~\eqref{eq:calibration} is fitted on the lines of the map itself. Starting from the beamline
+calibration ($E = \rCalGainBL\,c \rCalOffsetBL$), gain and offset are free parameters of a first fit
+of the average spectrum (Section~\ref{sec:fit}), which gives $\rCalGainFit\pm\rCalGainErr$\,eV per channel
+and $\rCalOffsetFit\pm\rCalOffsetErr$\,eV and lowers $\chi^2_\nu$ from \rCalChiBL{} to \rCalChiFit. The
+beamline calibration would place In~L$\alpha_1$ \qty{\rCalShiftIn}{eV}, Ga~K$\alpha_1$
+\qty{\rCalShiftGa}{eV} and As~K$\alpha_1$ \qty{\rCalShiftAs}{eV} from their true energies. The fitted
+calibration is then held fixed in every later fit. Its stability is checked by the centroid analysis of
+Section~\ref{sec:resolution}: the Ga~K$\alpha$ centroid moves by \qty{\rCentroidRange}{eV} at most over
+the scan and shows no step.
 
 \subsection{Resolution and line shape}
 The Gaussian width of a line combines an electronic-noise term and the Fano-limited fluctuation of the
@@ -455,7 +473,7 @@ escape peak is
 \end{equation}
 using total attenuation coefficients along the path (any interaction removes the photon) and the
 photoelectric coefficient $\tau$ in the sensor (a scattered photon does not deposit its full energy).
-No dead layer is assumed. Figure~\ref{fig:detector}a shows the factors for $d_\mathrm{air}=\qty{20}{cm}$,
+No dead layer is assumed. Figure~\ref{fig:detector}a shows the factors for $d_\mathrm{air}=\qty{\rDetAir}{cm}$,
 $d_\mathrm{C}=\qty{1}{\micro\metre}$ and $d_\mathrm{Si}=\qty{450}{\micro\metre}$. The efficiency is
 \rEffGa{} at Ga~K$\alpha_1$, \rEffAs{} at As~K$\alpha_1$, \rEffAsKb{} at As~K$\beta_1$, but only
 \rEffIn{} at In~L$\alpha_1$. The air path dominates that number: one more centimetre of air
@@ -467,7 +485,7 @@ This single factor is the main uncertainty of any quantification based on soft l
 
 \begin{figure}[t]
 \centering\includegraphics[width=\linewidth]{figures/fig04_detector.pdf}
-\caption{Detector. (a) Transmission of \qty{20}{cm} of air and of the \qty{1}{\micro\metre} carbon
+\caption{Detector. (a) Transmission of \qty{\rDetAir}{cm} of air and of the \qty{1}{\micro\metre} carbon
 window, photo-absorption in \qty{450}{\micro\metre} Si, and the resulting efficiency
 (Eq.~\ref{eq:efficiency}); dotted lines mark In~L$\alpha_1$, Ga~K$\alpha_1$ and As~K$\alpha_1$.
 (b) Efficiency versus sample--detector air path. (c) Total Si~K escape fraction (Eq.~\ref{eq:escape}).}
@@ -674,7 +692,7 @@ lines of interest.
 \caption{Sample model. (a) Stack and geometry. (b) Absorption factor (primary intensity relative to a
 non-absorbing layer) and (c) secondary-to-primary ratio of In~L$\alpha_1$, Ga~K$\alpha_1$ and
 As~K$\alpha_1$ for an In$_{0.5}$Ga$_{0.5}$As layer (\qty{5.5}{g.cm^{-3}}) of varying thickness,
-$\psi_\mathrm{in}=\psi_\mathrm{out}=40^\circ$; the dotted line marks \qty{1.9}{\micro\metre}.}
+$\psi_\mathrm{in}=\ang{\rIncidence}$, $\psi_\mathrm{out}=\ang{\rTakeoff}$; the dotted line marks \qty{1.9}{\micro\metre}.}
 \label{fig:matrix}
 \end{figure}
 
@@ -770,7 +788,7 @@ result by \qty{\rMatrixEffect}{\percent}.
 The InP cap matters only for In: it emits \qty{\rCapInFrac}{\percent} of the modelled In~L intensity and
 transmits \rCapTIn{} of In~L$\alpha$ and more than \rCapTGa{} of Ga and As~K$\alpha$. Ignoring the cap
 gives $n_\mathrm{In}/n_\mathrm{As} = \rxInNoCap$ (closure \rClosureNoCap) and leaves Ga/As unchanged
-(\rxGaNoCap). The closure deficit is therefore not a cap effect: even a \qty{500}{nm} cap would leave it at
+(\rxGaNoCap). The closure excess is therefore not a cap effect: even a \qty{500}{nm} cap would leave it at
 \rCapScanFive{} (against \rClosure{} at \qty{50}{nm}).
 
 \begin{table}[t]
@@ -799,9 +817,11 @@ background term and per group profile), the weighted least-squares solution and 
 \begin{equation}
 \hat{\mathbf a}_i = (D^\mathsf{T}W_iD)^{-1}D^\mathsf{T}W_i\,(\mathbf y_i - \tau_\mathrm{pp}\mathbf N^\mathrm{pp}_i/s_i),
 \qquad \mathrm{Cov}(\hat{\mathbf a}_i)=(D^\mathsf{T}W_iD)^{-1},
-\qquad (W_i)_{cc} = \frac{s_i^2}{\max(N_{ic},1)} .
+\qquad (W_i)_{cc} = \frac{s_i^2}{\max(\hat N_{ic},f)} ,
 \label{eq:linear}
 \end{equation}
+where $\hat N_{ic}$ is the modelled number of counts of channel $c$ (Section~\ref{sec:weights}) and
+$f=0.01$ a floor for channels where the model is close to zero.
 All pixels are solved at once with batched normal equations. The pixel-specific pile-up spectrum is
 subtracted before the solve because it does not fit in a shared design matrix. The median
 signal-to-noise ratio of the areas per pixel is \rSnrAs{} for As~K, \rSnrGa{} for Ga~K and \rSnrIn{}
@@ -809,12 +829,51 @@ for In~L. Atom-ratio maps follow from Eq.~\eqref{eq:stackquant} with the converg
 held fixed, so a map costs one matrix product. The errors are propagated from the two areas, treated
 as uncorrelated.
 
-The weights in Eq.~\eqref{eq:linear} use the observed counts (Neyman's $\chi^2$). This is unbiased for
-the strong Ga~K and As~K channels but biases weak peaks low. Channels with fewer counts receive larger
-weights, and a downward fluctuation pulls the fit down \citep{Baker1984,Mighell1999}. On peaks of
-In~L intensity the bias reaches tens of per cent per pixel. The In~L map should therefore not be
-interpreted quantitatively pixel by pixel until the weights are taken from the model
-(Section~\ref{sec:recommendations}).
+\subsection{Choice of the weights}\label{sec:weights}
+The Poisson variance of a channel is its \emph{expected} number of counts, which is not known before
+the fit. Taking the observed counts $N_{ic}$ instead (Neyman's $\chi^2$, $(W_i)_{cc}=s_i^2/\max(N_{ic},1)$)
+makes the weights correlated with the noise: a channel that fluctuated down receives a larger weight,
+one that fluctuated up a smaller one, and empty channels receive the largest weight of all. The fit is
+pulled down by about one count per channel \citep{Baker1984,Mighell1999}. This is negligible for the
+strong Ga~K and As~K lines but not for weak peaks, nor for the background under them.
+
+The per-pixel solve therefore takes the variance from the model (Pearson weights). The first solve uses
+the Neyman weights; each of \rPearsonIter{} further solves uses $\hat N_{ic} = s_i(D\hat{\mathbf
+a}_i)_c + \tau_\mathrm{pp}N^\mathrm{pp}_{ic}$ from the previous one, in raw counts, pile-up included. The
+weights are not differentiated, so this iteratively re-weighted least squares converges to the Poisson
+maximum-likelihood solution, and $(D^\mathsf{T}W_iD)^{-1}$ is the Poisson covariance. The cost is one
+batched solve per iteration.
+
+The model is linear in the areas, so for an unbiased solve the mean of the per-pixel areas equals
+the area fitted on the average spectrum (Section~\ref{sec:fit}). Table~\ref{tab:weights} compares the
+two for the three weightings (without resolution tracking). With Neyman weights In~L is
+\qty{\rWNeyIn}{\percent} away from the average-spectrum area and Ca~K \qty{\rWNeyCa}{\percent}; with Pearson
+weights the differences are \qty{\rWPeaIn}{\percent} and \qty{\rWPeaCa}{\percent}, and Ga~K and As~K do not
+change. Uniform weights have no such bias, but the channels of the strong lines then dominate every
+pixel and the line-shape misfit leaks into the weak groups (In~L \qty{\rWUniIn}{\percent}, Ca~K
+\qty{\rWUniCa}{\percent}, and far more for the undetected groups). The median reduced $\chi^2$ of the pixels
+is \rWChiNey{} with Neyman weights and \rWChiPea{} with Pearson weights: the Neyman value is biased low
+as well, for the same reason as the areas. The median In~L/As~K area ratio changes by
+\qty{\rWInAsPct}{\percent} from Neyman to Pearson weights. Cu~K, Ni~K and Ar~K are not detected in a single pixel (signal-to-noise
+below 2), and their per-pixel areas remain sensitive to the weights and to the tails of the Ga~K and
+As~K lines whatever the weighting. The maps of this note use Pearson weights.
+
+\begin{table}[h]
+\centering\small
+\caption{Per-pixel weighting: median signal-to-noise ratio per pixel, and mean of the per-pixel
+areas relative to the average-spectrum area (\%), for Neyman, Pearson (\rPearsonIter{} re-weighting
+iterations) and uniform weights.}
+\label{tab:weights}
+\begin{tabular}{@{}l rr rrr@{}}
+\toprule
+ & \multicolumn{2}{c}{S/N per pixel} & \multicolumn{3}{c}{mean area $-$ average area (\%)} \\
+\cmidrule(lr){2-3}\cmidrule(l){4-6}
+Group & Neyman & Pearson & Neyman & Pearson & uniform \\
+\midrule
+\rWeightRows
+\bottomrule
+\end{tabular}
+\end{table}
 
 %=====================================================================================
 \section{Resolution stability during the scan}\label{sec:resolution}
@@ -865,7 +924,10 @@ where $\lambda_i$ projects the pixel's group areas on those of the shape fit. Th
 handles changes of a few per cent in any pixel, including those inside a row.
 \end{description}
 Table~\ref{tab:modes} compares the four options. Either correction removes the step and lowers the
-median per-pixel $\chi^2_\nu$ from \rChiMapNone{} to about~1. Combining them (the default) also corrects
+median per-pixel $\chi^2_\nu$ from \rChiMapNone{} to \rChiMapBoth--\rChiMapLin. With Pearson weights the
+per-pixel errors are the Poisson ones (Section~\ref{sec:weights}), so the remaining excess over~1 is
+model misfit, chiefly the low-energy tails of the strong lines that the Voigt profile does not contain
+(Section~\ref{sec:fit}). Combining the corrections (the default) also corrects
 the first \rChangePix{} pixels of row \rStepRow, which belong to the new segment but were still measured
 with the old resolution (width change between \qty{\rWcFirst}{\percent} and \qty{\rWcBeforeChange}{\percent}, against
 \qty{\rWcAtChange}{\percent} for the next pixel).
@@ -904,7 +966,7 @@ map has a median of \rxMed{} (\rxNoneMed{} without resolution tracking) and a pi
 deviation of \rxSpread. The statistical error expected from the area errors, scaled by the square root
 of the median $\chi^2_\nu$, is \rxStat{} per pixel. The excess, $\sqrt{\rxSpread^2-\rxStat^2}=\rxExcess$
 (\rxExcessNone{} without tracking), is real composition variation or residual systematics at the level
-of half a per cent. Its pattern is not random: the ratio and the Ga map both show a diagonal
+of a few tenths of a per cent. Its pattern is not random: the ratio and the Ga map both show a diagonal
 cross-hatch with a period of a few micrometres. Lattice-mismatched films often show such a
 composition modulation along misfit-dislocation directions, and it can be compared directly with the
 strain maps from the Laue patterns of the same scan.
@@ -921,25 +983,32 @@ is the median.}
 \subsection{Uncertainty budget}\label{sec:uncertainty}
 The statistical error of the average is negligible. The accuracy is set by the model parameters that are
 not measured. Table~\ref{tab:sensitivity} and Fig.~\ref{fig:sensitivity} requantify the same fitted areas
-after changing one parameter at a time. The Ga/As ratio stays within \rxGaMin--\rxGaMax{}. The largest
-effect is the KB grazing angle, which is not recorded: \num{2.5} and \qty{3.5}{mrad} give \rxGaKBLo{}
-and \rxGaKBHi, because a steeper angle lowers the high-energy cut-off and with it the excitation of
-As relative to Ga. Next comes the air path (\qty{\pm2}{\percent} for \qty{\pm2}{cm}), because the
-efficiencies of Ga~K$\alpha$ and As~K$\alpha$ are not equal. A beam offset of \qty{25}{\micro\radian}
-from the orbit plane gives \rxGaOffTF; geometry, film thickness and pressure contribute a few tenths
-of a per cent. The vertically integrated source used in
+after changing one parameter at a time. The Ga/As ratio stays within \rxGaMin--\rxGaMax{}. The two
+largest effects are the KB grazing angle, which is not recorded: \num{2.5} and \qty{3.5}{mrad} give
+\rxGaKBLo{} and \rxGaKBHi, because a steeper angle lowers the high-energy cut-off and with it the
+excitation of As relative to Ga; and the air path (\rxGaAirLo{} and \rxGaAirHi{} for \qty{\pm2}{cm}),
+because the efficiencies of Ga~K$\alpha$ and As~K$\alpha$ are not equal. Since the air path was measured,
+\qty{\pm2}{cm} stands mainly for a possible change of the setup between sessions. A beam offset of \qty{25}{\micro\radian}
+from the orbit plane gives \rxGaOffTF; the detector angle ($2\theta\pm\ang{5}$: \rxGaTthLo{} and
+\rxGaTthHi), film thickness and pressure contribute a few tenths of a per cent. The air path and
+$2\theta$ were set on GaAs wafers measured two months after this map, so these ranges also cover a
+small change of the setup in between. The vertically integrated source used in
 earlier versions of the code (\rxGaGOne) is listed for reference only; it is not a plausible
 alternative for this beamline. The In content and the closure are a different matter: the closure ranges from \rClosureAirLo{} to
-\rClosureAirHi{} for an air path of \num{18} to \qty{22}{cm}, and reaching~1 would need
-\qty{\rAirForClosure}{cm} of air with everything else nominal. The measured In~L intensity is therefore
-not a measurement of the In content until the detection path is known; whether the remaining excess
-comes from the air path alone, from the take-off angle, or from the In~L line strengths themselves
-cannot be decided from this map.
+\rClosureAirHi{} for \qty{\pm2}{cm} of air around the measured \qty{\rDetAir}{cm}, from
+\rClosureTthLoExact{} to \rClosureTthHiExact{} for $2\theta\pm\ang{5}$, and from
+\rCapScanZero{} to \rCapScanFive{} for an InP cap of 0 to \qty{500}{nm}; a film
+\qty{20}{\percent} thinner or thicker moves it by less than 0.1 (Table~\ref{tab:sensitivity}). Reaching~1 would need \qty{\rAirForClosure}{cm} of air with everything else
+nominal, \qty{4}{cm} less than measured. With the detection geometry now measured or calibrated, the
+excess is more likely in the soft-line chain itself: the In~L line strengths, the detection efficiency
+below \qty{4}{keV} (window, a dead layer, humidity of the air), or the cap. An InP or InAs
+reference measured in the same geometry would separate them.
 
 \begin{table}[t]
 \centering
 \caption{Sensitivity of the film composition to unmeasured parameters (same fitted areas,
-requantified). Nominal: \qty{20}{cm} air at \qty{1013}{hPa}, $40^\circ$/$40^\circ$, film
+requantified). Nominal: \qty{\rDetAir}{cm} air at \qty{1013}{hPa} and \qty{\rAirTemp}{\degreeCelsius},
+incidence \ang{\rIncidence} and take-off \ang{\rTakeoff} ($2\theta=\ang{\rTwoTheta}$), film
 \qty{1.9}{\micro\metre}, cap \qty{50}{nm}, on-axis source limited by s3, KB angles \qty{3}{mrad}.
 The last four rows change the incident spectrum; the $G_1$ row is the previous, vertically
 integrated source model, shown for reference.}
@@ -970,14 +1039,15 @@ edges, and the detector and matrix corrections are similar for both lines. The t
 difference at the per-cent level are the bandwidth Jacobian (\qty{\rkJacobianBias}{\percent}), the vertical
 acceptance of the beamline (\qty{\rGOneShift}{\percent}) and the sample model (\qty{\rMatrixEffect}{\percent}); resolution tracking matters at the level of \qty{1}{\percent} locally.
 What remains uncertain for Ga/As is the incident spectrum itself, chiefly through the KB grazing
-angles (\rxGaKBLo--\rxGaKBHi); a GaAs reference measured in the same configuration would calibrate it
-directly.
+angles (\rxGaKBLo--\rxGaKBHi). The GaAs wafers fix the Ga/As sensitivity of the November 2026 setup,
+through the detector angle; a GaAs reference measured in the same session as the sample would calibrate
+it directly.
 
 \paragraph{What is not.} Soft lines (In~L here, and generally L lines of $Z\lesssim55$ and K lines below
-\qty{4}{keV}) depend exponentially on the sample--detector air path. The path is known to a few
-centimetres only, and its effective length also depends on the take-off angle and on the beam position
-on the sample. A one-centimetre error changes the In~L efficiency by \qty{\rInPerCmPct}{\percent}. The same
-lines are the most absorbed in the sample and the most affected by the Neyman bias of the per-pixel solve.
+\qty{4}{keV}) depend exponentially on the sample--detector air path. The path was measured once
+(November 2026); its effective length also depends on the take-off angle and on the beam position on
+the sample, and it may change between sessions. A one-centimetre error changes the In~L efficiency by \qty{\rInPerCmPct}{\percent}. The same
+lines are the most absorbed in the sample and have the lowest signal-to-noise ratio per pixel.
 
 \paragraph{Line shape.} The largest remaining misfit of the spectrum is the low-energy tail and shelf of
 the strong lines. The fitted Lorentzian width (\qty{\rGamma}{eV}) partly mimics it. A tail that is not
@@ -1010,7 +1080,7 @@ from the orbit plane changes the Ga/As sensitivity by \qty{\rOffFifty}{\percent}
 model depends on them, whereas the exact gaps matter little as long as the vertical acceptance stays
 below about \qty{20}{\micro\radian}.
 \item \textbf{Record the local pressure and temperature} (or take them from the ESRF logging), since
-the In~L$\alpha$ efficiency through \qty{20}{cm} of air changes by \qty{\rLowPPct}{\percent} between \num{990} and \qty{1013}{hPa}.
+the In~L$\alpha$ efficiency through \qty{\rDetAir}{cm} of air changes by \qty{\rLowPPct}{\percent} between \num{990} and \qty{1013}{hPa}.
 \item \textbf{Characterise the monitor.} Measure its dark offset and linearity against the ring current,
 or log the ring current with every point and model the monitor as $m=a+bI$; consider a monitor after
 the KB mirrors.
@@ -1026,9 +1096,10 @@ dead time exceeds \qtyrange{30}{40}{\percent}. Pile-up corrections are first ord
 
 \subsection{Calibration with standards}
 \begin{enumerate}[leftmargin=*,itemsep=2pt,resume]
-\item \textbf{Measure binary reference materials} in the same geometry: GaAs, InP and InAs wafers (bulk)
-calibrate the Ga/As and In/As (and In/P) sensitivities directly, including the effective air path and
-detector efficiency. A GaAs wafer would turn the closure test into a calibration of the In~L line.
+\item \textbf{Measure binary reference materials} in the same geometry and session as the samples. Two
+GaAs wafers were measured in November 2026 and set the detector angle used here
+(\code{GaAs\_calibration.ipynb}); InP and InAs wafers would do the same for the In~L line, including the
+effective air path and the efficiency below \qty{4}{keV}, and turn the closure test into a calibration.
 \item \textbf{Measure a thin-film standard} (e.g.\ a certified multi-element thin film, or an In$_x$Ga$_{1-x}$As
 layer of known $x$ and thickness from XRD or RBS) to test the thin-film matrix model separately from bulk
 absorption.
@@ -1040,13 +1111,11 @@ measured one.
 
 \subsection{Analysis}
 \begin{enumerate}[leftmargin=*,itemsep=2pt,resume]
-\item \textbf{Fit the energy calibration} (gain and offset) on the average spectrum, or at least
-check it against the strong lines, rather than holding the beamline calibration fixed.
-\item \textbf{Add a low-energy tail and shelf} to the line shape (Hypermet-type step and exponential tail \citep{Phillips1976}, with amplitudes as smooth functions of energy). This is the largest remaining
-misfit, and it biases peaks lying just below strong lines.
-\item \textbf{Use model-based (Pearson) weights in the per-pixel solve}, $W_{cc}=s_i^2/\hat N_{ic}$, obtained by
-one or two re-weighting iterations starting from Eq.~\eqref{eq:linear}, or a Poisson likelihood
-\citep{Baker1984}; this removes the downward bias on weak peaks such as In~L.
+\item \textbf{Use the low-energy tail and shelf} of the line shape (Hypermet-type step and exponential
+tail \citep{Phillips1976}). They are implemented in \code{xrf\_fit} (\code{fit\_tails=True}) but not yet
+used in this note or in the analysis notebook. This is the largest remaining misfit, and it biases peaks
+lying just below strong lines; the energy calibration, recommended here before, is now fitted
+(Section~\ref{sec:detector}).
 \item \textbf{Treat Laue reflections explicitly}: detect narrow peaks that are not fluorescence lines from the
 per-pixel residuals, and mask or model them pixel by pixel.
 \item \textbf{Compute pile-up from the input rate} when the dead time is high, and allow the resolving
