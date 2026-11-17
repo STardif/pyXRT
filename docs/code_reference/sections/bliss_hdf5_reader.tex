@@ -49,6 +49,8 @@ time & $(n,)$ \\
 \fn{loopscan} & npoints, time & $(n,)$ \\
 \fn{timescan ftimescan} & time [npoints] (0 or absent: until stopped) & $(n,)$ \\
 \fn{ct sct} & [time] & $()$ \\
+\fn{lookupscan pointscan} & time \fn{on motors (m1,m2,...)}; geometry from the positions
+(the \emph{first} motor is the fast one) & grid, or $(n,)$ \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -63,6 +65,11 @@ time & $(n,)$ \\
   motor matches the reversed first row better than the first row itself.
 \item An aborted 1D scan keeps its recorded length; an aborted mesh keeps its planned shape
   and missing points are NaN in gridded data.
+\item The points of a trajectory scan (\fn{lookupscan}) form a grid when every motor sits on
+  a set of levels separated by gaps much larger than the readback noise, and every grid cell
+  holds at most one point. Such scans are \emph{reordered in memory}: \fn{get()},
+  \fn{positions()} and \fn{counters} return the values in grid order (row-major, slowest
+  motor first), \fn{point_number} keeps the original point numbers. The file is not changed.
 \item Frames are read through the master file's virtual dataset; when there is none, the
   image files are found by listing the scan folder (top level only).
 \end{itemize}
@@ -73,7 +80,8 @@ time & $(n,)$ \\
 \pycode{bliss_hdf5_reader}{_header}
 
 The constants list the positioner names that are time axes, not motors (\fn{TIME_AXES}),
-the commands without a motor (\fn{TIME_SCANS}) and the single-point commands.
+the commands without a motor (\fn{TIME_SCANS}), the single-point commands and the
+trajectory commands (\fn{TRAJECTORY_SCANS}), whose geometry comes from the positions.
 
 \api[\texttt{\_open}]{\texttt{\_open(path)}}
 Opens a file read-only with HDF5 file locking disabled (\fn{locking=False}), so that a file
@@ -155,6 +163,17 @@ its planned size is unknown (shape $(0,)$ at this stage, replaced by the recorde
 \pycode{bliss_hdf5_reader}{_parse_time_scan}
 \pycode{bliss_hdf5_reader}{_parse_single_point}
 
+\api[\texttt{\_trajectory\_motors}, \texttt{\_grid\_levels}]{\texttt{\_trajectory\_motors(title)}, \texttt{\_grid\_levels(pos, min\_ratio=5)}}
+\fn{_trajectory_motors} reads the motor names and count time of
+\fn{lookupscan <time> on motors (m1,m2,...)}; the shape is not in the title.
+\fn{_grid_levels} groups the positions of one motor into levels: the gaps between sorted
+positions are split into gaps between levels and readback noise inside a level at the largest
+ratio between consecutive gap sizes (sorted in decreasing order). Below \fn{min_ratio} there
+is no such contrast and every distinct position is a level. Returns the level values
+(medians) and the level index of every point.
+\pycode{bliss_hdf5_reader}{_trajectory_motors}
+\pycode{bliss_hdf5_reader}{_grid_levels}
+
 \api[\texttt{\_parse\_title}]{\texttt{\_parse\_title(title)}}
 Dispatches on the first token with regular expressions (\texttt{[ad]\textbackslash d*scan\textbar{}lineup},
 \texttt{f\textbackslash d+scan}) and the command tables. Returns \fn{(command, parsed)} with \fn{parsed}
@@ -178,9 +197,10 @@ demand.
 \end{args}
 \blk{Main attributes} \fn{title}, \fn{command} (and its former name \fn{scan_type}),
 \fn{shape}, \fn{motors} (list of \fn{ScanMotor}), \fn{npoints} (recorded),
-\fn{npoints_planned}, \fn{count_time}, \fn{snake}, \fn{geometry_source} (\fn{"title"} or
-\fn{"data"}), \fn{start_time}, \fn{end_time}, \fn{end_reason}, \fn{writer_status},
-\fn{sample_name}, \fn{scan_folder}; after \fn{read_data()}: \fn{counters} (raw arrays),
+\fn{npoints_planned}, \fn{count_time}, \fn{snake}, \fn{reordered}, \fn{point_number},
+\fn{geometry_source} (\fn{"title"}, \fn{"trajectory"} or \fn{"data"}), \fn{start_time}, \fn{end_time}, \fn{end_reason}, \fn{writer_status},
+\fn{sample_name}, \fn{scan_folder}; after \fn{read_data()}: \fn{counters} (arrays as stored,
+in grid order for reordered trajectory scans),
 \fn{grids} (scalar counters on the scan grid), \fn{image_path_list}, \fn{nb_images},
 \fn{nb_frames}.
 \pycode{bliss_hdf5_reader}{BlissScan}
@@ -193,7 +213,9 @@ types of every measurement dataset (not the data), the positioner names
 positions of every positioner recorded once per point (kept in a cache for geometry
 inference and snake detection). It then:
 \begin{enumerate}[nosep]
-\item parses the title; if that fails, infers the geometry from the motor positions;
+\item parses the title; for a trajectory command, builds the grid from the positions of the
+  motors named in the title (\fn{_trajectory_geometry}); if the title is not recognised,
+  infers the geometry from the motor positions;
 \item takes the count time from \fn{scan_parameters}, else from the title;
 \item determines the planned number of points: the product of the title shape, overridden
   by \fn{scan_parameters/npoints} if they disagree (with a warning);
@@ -221,8 +243,9 @@ scans.
 Geometry for unrecognised titles. Motors that do not move (peak-to-peak range below
 $10^{-9}$ of their magnitude) are ignored. If the moving motors form a mesh
 (\fn{_infer_mesh}), the shape is $(n_\mathrm{slow}, n_\mathrm{fast})$, extended to the planned
-number of rows for an aborted mesh; otherwise the scan is 1D and every moving motor drives
-dimension 0.
+number of rows for an aborted mesh. Otherwise, if the points form a complete grid visited
+in any order (\fn{_trajectory_geometry} with \fn{strict=True}), the scan is reordered as a
+trajectory scan; otherwise it is 1D and every moving motor drives dimension 0.
 \pycode{bliss_hdf5_reader}{BlissScan._infer_geometry}
 
 \api[\texttt{BlissScan.\_row\_length}]{\texttt{BlissScan.\_row\_length(pos)} (static)}
@@ -238,6 +261,18 @@ length, and the fast motors those that repeat the same positions on the second r
 the first, in the same or the reversed order (mismatch below a tenth of their range).
 Returns \fn{((n_slow, n_fast), motors)} or \fn{None}.
 \pycode{bliss_hdf5_reader}{BlissScan._infer_mesh}
+
+\api[\texttt{BlissScan.\_trajectory\_geometry}]{\texttt{BlissScan.\_trajectory\_geometry(names, npts\_planned, strict)}}
+Geometry of points visited in any order. The positions of each moving motor are grouped into
+levels (\fn{_grid_levels}); motors with the same level of every point (a motor and its
+encoder) share a dimension. Motors are taken in the order of \fn{names}, the first being the
+fastest (last) dimension, as in \fn{amesh}. The points form a grid if no two points fall in
+the same cell and the number of cells is the planned number of points (title-based, missing
+cells allowed for an aborted scan) or exactly the number of recorded points
+(\fn{strict=True}, unknown titles). Returns \fn{(shape, motors, scan_order)}, where
+\fn{scan_order} is the original point number of each grid cell (row-major, $-1$ if empty),
+or \fn{None} for a 1D scan. Warns when the levels are not evenly spaced.
+\pycode{bliss_hdf5_reader}{BlissScan._trajectory_geometry}
 
 \api[\texttt{BlissScan.\_detect\_snake}]{\texttt{BlissScan.\_detect\_snake()}}
 A 2D scan is back-and-forth if the second row of the fast motor is closer to the reversed
@@ -259,6 +294,17 @@ The flat point index at each grid position, $-1$ where no point was recorded; od
 reversed for a back-and-forth mesh. It is the single object that places per-point data on
 the grid, used by \fn{to_grid} and by the image scripts.
 \pycode{bliss_hdf5_reader}{BlissScan.index_grid}
+For a reordered trajectory scan it is \fn{scan_order} on the grid.
+
+\api[\texttt{reordered}, \texttt{point\_number}, \texttt{to\_scan\_order}]{\texttt{reordered}, \texttt{point\_number} (properties); \texttt{to\_scan\_order(data)}}
+\fn{reordered} is true for trajectory scans put on a grid. \fn{point_number[k]} is the
+original point number (file index, argument of \fn{read_frame}) of the $k$-th value of
+\fn{counters} and \fn{get()}: \fn{arange(npoints)} for other scans. \fn{to_scan_order}
+puts per-point data in file order (e.g.\ per-frame results) in that order, with NaN for empty
+cells; data whose first axis is not \fn{npoints} are returned unchanged.
+\pycode{bliss_hdf5_reader}{BlissScan.reordered}
+\pycode{bliss_hdf5_reader}{BlissScan.point_number}
+\pycode{bliss_hdf5_reader}{BlissScan.to_scan_order}
 
 \api[\texttt{get\_available\_counters}, \texttt{get}, \texttt{\_\_getitem\_\_}, \texttt{positions}]{\texttt{get\_available\_counters()} (alias \texttt{list\_counters}), \texttt{get(name, grid=False)}, \texttt{\_\_getitem\_\_(name)}, \texttt{positions(motor, grid=False)}}
 \fn{get_available_counters} returns \texttt{\{name: \{"shape", "dtype"\}\}} for every
@@ -278,7 +324,8 @@ missing points (aborted mesh) the output is filled with NaN (integer data are pr
 floating point for that) and the recorded points are placed through \fn{index_grid}, which
 also un-snakes back-and-forth rows. A counter with one value more than the grid (BLISS
 sometimes records one point ahead on abort) is truncated. Raises \fn{ValueError} when the
-first axis is not one value per point.
+first axis is not one value per point. The data are expected in the order of \fn{get()}:
+for a reordered scan they are already in grid order and are reshaped.
 \pycode{bliss_hdf5_reader}{BlissScan.to_grid}
 
 \api[\texttt{BlissScan.read\_data}]{\texttt{BlissScan.read\_data(extra\_counters=None)}}
