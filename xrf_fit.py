@@ -1865,6 +1865,30 @@ def design_matrix(model: "XRFModel", shape_params: Sequence[float]) -> np.ndarra
     return np.column_stack(cols)
 
 
+# Smallest modelled count per channel used as a Poisson variance (Pearson weights).
+PEARSON_MODEL_FLOOR = 0.01
+
+
+def _solve_weighted(A: np.ndarray, W: np.ndarray, y: np.ndarray
+                    ) -> Tuple[np.ndarray, np.ndarray]:
+    """Weighted least squares for many pixels at once: coefficients (n_pix, k)
+    and covariances (n_pix, k, k) of ``y ~ A c`` with channel weights W."""
+    k = A.shape[1]
+    # Stacked normal equations: (A^T W A) c = A^T W y, one k x k system per pixel.
+    AtWA = np.einsum("ck,pc,cl->pkl", A, W, A, optimize=True)
+    AtWy = np.einsum("ck,pc,pc->pk", A, W, y, optimize=True)
+    # Nudge the diagonal so an all-zero pixel does not make the solve singular;
+    # such pixels are flagged NaN by the caller.  The nudge is relative to
+    # each diagonal entry: the columns differ in scale by many decades (the
+    # width column carries the full shape amplitudes), and a nudge scaled to
+    # the trace would shrink the unit-amplitude group columns (by ~4 % on GaAs).
+    diag = np.einsum("pkk->pk", AtWA)
+    ridge = 1e-12 * (diag + 1e-300)[:, :, None] * np.eye(k)
+    c = np.linalg.solve(AtWA + ridge, AtWy[..., None])[..., 0]
+    cov = np.linalg.inv(AtWA + ridge)
+    return c, cov
+
+
 def fit_map(
     raw_spectra: np.ndarray,
     scale: np.ndarray,
@@ -1877,14 +1901,28 @@ def fit_map(
     segments: Optional[np.ndarray] = None,
     width_correction: bool = False,
     mask: Optional[np.ndarray] = None,
+    weights: str = "pearson",
+    pearson_iterations: int = 2,
+    model_floor: float = PEARSON_MODEL_FLOOR,
 ) -> MapResult:
-    """Solve the fixed-shape model for every pixel of a map, in one pass.
+    """Solve the fixed-shape model for every pixel of a map.
 
     The normal equations are assembled and solved for all pixels simultaneously
     (``A^T W A`` is only ``k x k`` per pixel, with ``k`` the number of
-    components), so the cost is two tensor contractions rather than any
-    iteration.  The per-pixel covariance falls out of the same factorisation,
-    which is what gives every map an error map for free.
+    components), so one solve costs two tensor contractions.  The per-pixel
+    covariance falls out of the same factorisation, which is what gives every
+    map an error map for free.
+
+    Weights.  The Poisson variance of a channel is its *expected* count.
+    Neyman weights (``1 / observed counts``) are correlated with the noise:
+    channels that fluctuated down weigh more, which biases weak peaks and the
+    background low, by about one count per channel (tens of per cent on a
+    peak of ~100 counts per pixel).  Pearson weights (``1 / model counts``)
+    remove this: the first solve uses Neyman weights, then each of the
+    ``pearson_iterations`` re-solves takes the weights from the previous
+    model of the pixel.  This iteratively re-weighted least squares converges
+    to the Poisson maximum-likelihood solution; two re-solves are enough in
+    practice.  The cost is ``1 + pearson_iterations`` solves.
 
     Parameters
     ----------
@@ -1900,9 +1938,10 @@ def fit_map(
         resolution parameters.
     map_shape : (n_slow, n_fast)
     poisson_weights : bool
-        Weight each channel by ``1 / Var(y)``, ``Var(y) = raw / scale^2``.
+        Weight each channel by ``1 / Var(y)`` (kind set by ``weights``).
         Strongly recommended: without it the strongest channels dominate every
-        pixel and the reported errors are meaningless.
+        pixel and the reported errors are meaningless.  False is the same as
+        ``weights="uniform"``.
     clip_negative : bool
         Clip negative fitted amplitudes to zero.  Off by default, because a
         negative amplitude is diagnostic of a mis-specified model or an
@@ -1934,6 +1973,17 @@ def fit_map(
         :meth:`xrf_region.SurfaceRegion.scan_mask`.  The others are not
         fitted and are NaN in every map, so map statistics (medians,
         histograms, worst pixels) only see the region.  Default: all pixels.
+    weights : {"pearson", "neyman", "uniform"}
+        ``"pearson"`` (default): ``Var(y) = model counts / scale^2``, from
+        iterated solves (see above).  ``"neyman"``: ``Var(y) = max(raw, 1) /
+        scale^2`` in a single solve (the behaviour before Pearson weights were
+        added; biased on weak peaks).  ``"uniform"``: unweighted.
+    pearson_iterations : int
+        Number of re-solves with model weights (``weights="pearson"``).
+    model_floor : float
+        Smallest modelled count per channel used as a variance (raw counts),
+        so that channels where the model is ~0 or negative do not get
+        unbounded weights.
 
     Returns
     -------
@@ -1973,6 +2023,9 @@ def fit_map(
 
     if model.pileup is not None and pileup is None:
         raise ValueError("The model includes pile-up: pass the per-pixel `pileup` spectra.")
+    kind = weights.lower() if poisson_weights else "uniform"
+    if kind not in ("pearson", "neyman", "uniform"):
+        raise ValueError(f"weights must be 'pearson', 'neyman' or 'uniform', got {weights!r}")
 
     ng, nb = len(model.groups), model.n_bkg
     k = nb + ng + (1 if width_correction else 0)
@@ -1998,23 +2051,19 @@ def fit_map(
                        for j in range(ng))
             A = np.column_stack([A, dcol])
 
-        if poisson_weights:
-            W = (s_safe[sel, None] ** 2) / np.maximum(raw[sel], 1.0)
-        else:
+        s2 = s_safe[sel, None] ** 2
+        if kind == "uniform":
             W = np.ones_like(ys)
-
-        # Stacked normal equations: (A^T W A) c = A^T W y, one k x k system per pixel.
-        AtWA = np.einsum("ck,pc,cl->pkl", A, W, A, optimize=True)
-        AtWy = np.einsum("ck,pc,pc->pk", A, W, ys, optimize=True)
-        # Nudge the diagonal so an all-zero pixel does not make the solve singular;
-        # such pixels are flagged NaN below via `good`.  The nudge is relative to
-        # each diagonal entry: the columns differ in scale by many decades (the
-        # width column carries the full shape amplitudes), and a nudge scaled to
-        # the trace would shrink the unit-amplitude group columns (by ~4 % on GaAs).
-        diag = np.einsum("pkk->pk", AtWA)
-        ridge = 1e-12 * (diag + 1e-300)[:, :, None] * np.eye(k)
-        c = np.linalg.solve(AtWA + ridge, AtWy[..., None])[..., 0]
-        cov = np.linalg.inv(AtWA + ridge)
+        else:
+            W = s2 / np.maximum(raw[sel], 1.0)                  # Neyman: observed counts
+        c, cov = _solve_weighted(A, W, ys)
+        if kind == "pearson":
+            # counts that are in the pixel but not in A (pile-up) are part of the variance
+            known = raw[sel] - ys * s_safe[sel, None]
+            for _ in range(pearson_iterations):
+                expected = (c @ A.T) * s_safe[sel, None] + known    # model, raw counts
+                W = s2 / np.maximum(expected, model_floor)
+                c, cov = _solve_weighted(A, W, ys)
         coef[sel] = c
         err[sel] = np.sqrt(np.clip(np.einsum("pkk->pk", cov), 0.0, None))
         resid = ys - c @ A.T

@@ -640,7 +640,8 @@ the true uncertainty.
 \begin{hyp}
 Gaussian errors. Minimising $\chi^2$ with data-derived weights (Neyman's $\chi^2$) biases
 the amplitudes low at low counts \citep{Baker1984,Mighell1999}; map averages and long single
-measurements have many counts per channel, where the bias is negligible.
+measurements have many counts per channel, where the bias is negligible. The per-pixel solve,
+with few counts per channel, uses model-derived weights instead (\fn{fit_map}).
 \end{hyp}
 \blk{Returns} a \fn{FitResult}.
 \pycode{xrf_fit}{fit_average_spectrum}
@@ -695,7 +696,7 @@ group with unit amplitude (\fn{group_profile} with all other amplitudes set to 0
 $(n_\mathrm{channels}, n_\mathrm{bkg}+n_\mathrm{groups})$ array.
 \pycode{xrf_fit}{design_matrix}
 
-\api[\texttt{fit\_map}]{\texttt{fit\_map(raw\_spectra, scale, model, shape\_params, map\_shape, poisson\_weights=True, clip\_negative=False, pileup=None, segments=None, width\_correction=False, mask=None)}}
+\api[\texttt{fit\_map}]{\texttt{fit\_map(raw\_spectra, scale, model, shape\_params, map\_shape, poisson\_weights=True, clip\_negative=False, pileup=None, segments=None, width\_correction=False, mask=None, weights="pearson", pearson\_iterations=2, model\_floor=PEARSON\_MODEL\_FLOOR)}}
 Solves the fixed-shape model for every pixel.
 \begin{args}
 \item[raw\_spectra] raw counts $(n_\mathrm{pixels}, n_\mathrm{channels})$: the weights are
@@ -704,8 +705,9 @@ Solves the fixed-shape model for every pixel.
 \item[model] an \fn{XRFModel} for the fit range (no scatter, polynomial background).
 \item[shape\_params] parameter vector of the average fit, or \texttt{\{segment: vector\}}.
 \item[map\_shape] $(n_\mathrm{slow}, n_\mathrm{fast})$.
-\item[poisson\_weights] weight each channel by $1/\mathrm{Var}(y) = s^2/\max(x,1)$. Without
-  them the strongest channels dominate every pixel and the errors are meaningless.
+\item[poisson\_weights] weight each channel by $1/\mathrm{Var}(y)$, of the kind set by
+  \fn{weights}. Without them the strongest channels dominate every pixel and the errors are
+  meaningless; \fn{False} is the same as \fn{weights="uniform"}.
 \item[clip\_negative] clip negative amplitudes to zero (off: a negative amplitude is a
   diagnostic of a mis-specified model).
 \item[pileup] per-pixel pile-up spectra; with a pile-up term in the model,
@@ -717,6 +719,13 @@ Solves the fixed-shape model for every pixel.
 \item[mask] pixels to solve, e.g. the facet of a crystal (\fn{SurfaceRegion.scan_mask},
   section~\ref{sec:region}); the others are not fitted and are NaN in every map, so that map
   statistics (medians, histograms, worst pixels) only see the region. Default: all pixels.
+\item[weights] \fn{"pearson"} (default): variance from the model, $s^2/\max(\hat x, f)$, by
+  iterated solves (below); \fn{"neyman"}: variance from the observed counts,
+  $s^2/\max(x,1)$, one solve (the former behaviour); \fn{"uniform"}: unweighted.
+\item[pearson\_iterations] number of re-solves with model weights (default 2).
+\item[model\_floor] smallest modelled count per channel $f$ used as a variance
+  (\fn{PEARSON_MODEL_FLOOR} $=0.01$), so that channels where the model is about zero or
+  negative do not get unbounded weights.
 \end{args}
 \blk{Method} For each pixel $p$ with design matrix $\mathbf A$ and weights $\mathbf W_p$, the
 weighted least-squares solution and its covariance are
@@ -729,6 +738,21 @@ assembled for all pixels at once with \fn{einsum} (each system is only $k\times 
 in one batched call; a relative ridge of $10^{-12}$ times the trace keeps empty pixels from
 making a system singular (they are set to NaN afterwards). The reduced $\chi^2$ of each pixel
 uses the same weights.
+\blk{Weights} The Poisson variance of a channel is its \emph{expected} count. Neyman weights
+($1/x$, observed counts) are correlated with the noise: a channel that fluctuated down weighs
+more, so weak peaks and the background are biased low, by about one count per channel
+\citep{Baker1984,Mighell1999}. Pearson weights take the variance from the model: the first
+solve uses Neyman weights, then each re-solve uses
+$(\mathbf W_p)_{cc} = s_p^2/\max(\hat x_{pc}, f)$ with $\hat x_{pc} = s_p(\mathbf A\hat{\mathbf
+c}_p)_c + x^\mathrm{known}_{pc}$, the model of the previous solve in raw counts, including the
+subtracted pile-up. The weights are not differentiated, so this iteratively re-weighted least
+squares converges to the Poisson maximum-likelihood solution, and its covariance is the
+Poisson one. On the InPoSi trajectory map (4096 pixels, per-pixel S/N of In~L about 7) the
+mean per-pixel In~L area is $-27\,\%$ below the average-spectrum area with Neyman weights and
+$+0.7\,\%$ with two Pearson re-solves; Ga~K and As~K change by less than $0.3\,\%$, and the
+median reduced $\chi^2$ goes from 0.76 to 1.09. The cost is $1+{}$\fn{pearson_iterations}
+solves.
+\pycode{xrf_fit}{_solve_weighted}
 \blk{Width correction} If the detector resolution changes slightly during the scan, the fixed
 widths bias overlapping peaks. The extra column is the derivative of the modelled peaks with
 respect to a common relative scaling $\varepsilon$ of every Gaussian width, at the shape
